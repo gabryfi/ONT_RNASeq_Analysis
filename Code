@@ -1,20 +1,21 @@
 
-
-### AUTO-> QC, DESeq, PCA, VolcanoPlot 
+### AUTO_BULK_RNA_Seq --> QC, DESeq, PCA, VolcanoPlot 
 
 #!/bin/bash
 
+set -euo pipefail
+
 # ======== PARAMETRI DA MODIFICARE =================
-FASTQ_DIR="/data/pacap_3/no_sample_id/20250519_1114_P2I-00111-A_PAY70806_608693f3/fastq_pass"   # input fastq
-CONTROL_LABEL="veh"                                                                             # condizione controllo
-TREATMENT_LABEL="pacap"                                                                         # condizione trattato
-CONTROL_BARCODES="01 02 03 04 05"                                                               # barcode controlli
-TREATMENT_BARCODES="06 07 08 09 10"                                                             # barcode trattati
-BATCH_NAME="Batch1"                                                                             # nome batch
-THREADS=18                                                                                      # quanti threds usare
-R_DIR="/data/ref/deseq_auto_import.R"                                                           # Path assoluto dove hai salvato lo script R
-REF="/path/to/ref/Homo_sapiens.GRCh38.dna.primary_assembly.fa"                                  # path assoluto del FASTA di riferimento
-GTF="/data/ref/Homo_sapiens.GRCh38.113.gtf"                                                     # path asssoluto del GTF
+FASTQ_DIR="/data//fastq_pass"   # input fastq
+CONTROL_LABEL="SANO"                                                                             # condizione controllo
+TREATMENT_LABEL="PB"                                                                             # condizione trattato
+CONTROL_BARCODES="01 02 03 04 05 06"                                                             # barcode controlli
+TREATMENT_BARCODES="07 08 09 10 11 12 13"                                                        # barcode trattati
+BATCH_NAME="Batch1"                                                                              # nome batch
+THREADS=20                                                                                       # quanti threds usare
+R_DIR="/data//ref"                                                                               # Path assoluto dove hai salvato lo script R
+REF="/data//Homo_sapiens.GRCh38.dna.primary_assembly.fa"                                         # path assoluto del FASTA di riferimento
+GTF="/data//ref/Homo_sapiens.GRCh38.113.gtf"                                                     # path asssoluto del GTF
 # ==================================================
 
 
@@ -26,12 +27,6 @@ cd "$WORK_DIR" || { echo "Errore: non trovo $WORK_DIR"; exit 1; } # Se stampa "E
 echo "Salvataggio output in: $WORK_DIR"
 
 # ================================================
-
-
-
-
-
-
 
 #############################
 ########### QC #############
@@ -103,14 +98,14 @@ echo "Starting alignment with reference $REF..."
 # Controlli
 for barcode in $CONTROL_BARCODES; do
     echo "Aligning barcode $barcode ($CONTROL_LABEL)..."
-    minimap2 -t "$THREADS" -a -x splice "$REF" \
+    minimap2 -t "$THREADS" -a -x splice -uf --secondary=no "$REF" \
         ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_full_length.fastq > ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_aln.sam
 done
 
 # Trattati
 for barcode in $TREATMENT_BARCODES; do
     echo "Aligning barcode $barcode ($TREATMENT_LABEL)..."
-    minimap2 -t "$THREADS" -a -x splice "$REF" \
+    minimap2 -t "$THREADS" -a -x splice -uf --secondary=no "$REF" \
         ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_full_length.fastq > ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_aln.sam
 done
 
@@ -169,19 +164,19 @@ done
 ########### DESeq ###########
 #############################
 
-
 echo "Lancio analisi DESeq2 su tutti i counts in: $WORK_DIR"
-Rscript "$R_DIR/deseq_auto_import.R" "$WORK_DIR"
+Rscript "$R_DIR/deseq_auto_import.R" \
+    "$WORK_DIR" \
+    "$TREATMENT_LABEL" \
+    "$CONTROL_LABEL"
 
 
-cat("Analisi completata. File salvati in:\n")
-cat(" - deseq_results.csv\n")
-cat(" - samples_metadata.csv\n")
-cat(" - PCA_plot.png\n")
-cat(" - Heatmap_top30.png\n")
-cat(" - Volcano_plot.png\n")
-
-
+echo "Analisi completata. File salvati in:"
+echo " - deseq_results.csv"
+echo " - samples_metadata.csv"
+echo " - PCA_plot.png"
+echo " - Heatmap_top30.png"
+echo " - Volcano_plot.png"
 
 -------------------------------------------------------------------------------------
 # deseq_auto_import.R:
@@ -194,16 +189,19 @@ suppressMessages({
   library(tools)
   library(pheatmap)
   library(ggplot2)
+  library(matrixStats)
   library(RColorBrewer)
 })
 
 # === PARAMETRO UNICO ===
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) != 1) {
+if (length(args) != 3) {
   stop("Uso: Rscript deseq_auto_import.R /percorso/a/WORK_DIR")
 }
 work_dir <- args[1]
+treatment <- args[2]
+control <- args[3]
 
 # === Trova tutti i file *_counts.txt ===
 count_files <- list.files(work_dir, pattern = "_counts\\.txt$", full.names = TRUE)
@@ -246,7 +244,7 @@ dds <- DESeqDataSetFromMatrix(
 )
 
 dds <- DESeq(dds)
-res <- results(dds, contrast = c("condition", "pacap", "veh"))
+res <- results(dds, contrast = c("condition", treatment, control))
 write.csv(as.data.frame(res), file = file.path(work_dir, "deseq_results.csv"))
 write.csv(sample_table, file = file.path(work_dir, "samples_metadata.csv"), row.names = FALSE)
 
@@ -285,10 +283,3 @@ volcano <- ggplot(res_df, aes(log2FoldChange, -log10(padj), color = threshold)) 
   ggtitle("Volcano Plot") +
   theme(legend.position = "none")
 ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano, width = 6, height = 5)
-
-
-
-
-
-
-
