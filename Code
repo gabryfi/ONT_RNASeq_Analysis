@@ -10,12 +10,12 @@ FASTQ_DIR="/data//fastq_pass"   # input fastq
 CONTROL_LABEL="SANO"                                                                             # condizione controllo
 TREATMENT_LABEL="PB"                                                                             # condizione trattato
 CONTROL_BARCODES="01 02 03 04 05 06"                                                             # barcode controlli
-TREATMENT_BARCODES="07 08 09 10 11 12 13"                                                        # barcode trattati
+TREATMENT_BARCODES="07 08 09 10 11 13"                                                        # barcode trattati
 BATCH_NAME="Batch1"                                                                              # nome batch
-THREADS=20                                                                                       # quanti threds usare
+THREADS=30                                                                                       # quanti threds usare
 R_DIR="/data//ref"                                                                               # Path assoluto dove hai salvato lo script R
-REF="/data//Homo_sapiens.GRCh38.dna.primary_assembly.fa"                                         # path assoluto del FASTA di riferimento
-GTF="/data//ref/Homo_sapiens.GRCh38.113.gtf"                                                     # path asssoluto del GTF
+REF="/home/user/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa"                                         # path assoluto del FASTA di riferimento
+GTF="/home/user/reference/gtf_human/BULK_HUMAN_G38.gtf"                                                     # path asssoluto del GTF
 # ==================================================
 
 
