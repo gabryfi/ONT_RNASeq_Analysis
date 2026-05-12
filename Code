@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # ======== PARAMETRI DA MODIFICARE =================
-FASTQ_DIR="/data//fastq_pass"   # input fastq
+FASTQ_DIR="/media/user/8Tb/pemfigo///fastq_pass"   # input fastq
 CONTROL_LABEL="SANO"                                                                             # condizione controllo
 TREATMENT_LABEL="PB"                                                                             # condizione trattato
 CONTROL_BARCODES="01 02 03 04 05 06"                                                             # barcode controlli
