@@ -1,0 +1,166 @@
+#!/usr/bin/env Rscript
+
+suppressMessages({
+  library(DESeq2)
+  library(stringr)
+  library(tools)
+  library(pheatmap)
+  library(ggplot2)
+  library(matrixStats)
+  library(RColorBrewer)
+})
+
+# === PARAMETRI ===
+args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) != 3) {
+  stop("Uso corretto: Rscript deseq_auto_import.R <WORK_DIR> <TREATMENT_LABEL> <CONTROL_LABEL>")
+}
+
+work_dir  <- args[1]
+treatment <- args[2]
+control   <- args[3]
+
+# === Trova tutti i file *_counts.txt ===
+count_files <- list.files(work_dir, pattern = "_counts\\.txt$", full.names = TRUE)
+if (length(count_files) == 0) stop("Nessun file *_counts.txt trovato nella cartella di lavoro.")
+
+# === Estrai metadati da filename ===
+extract_metadata <- function(filename) {
+  base <- basename(filename)
+  name <- file_path_sans_ext(base) # Rimuove l'estensione .txt
+  parts <- str_split(name, "_")[[1]]
+  
+  batch     <- parts[1]
+  barcode   <- parts[3]
+  condition <- parts[4]
+  sample    <- paste(batch, "bc", barcode, condition, sep = "_")
+  
+  return(data.frame(sample = sample, batch = batch, condition = condition, file = filename, stringsAsFactors = FALSE))
+}
+
+sample_table <- do.call(rbind, lapply(count_files, extract_metadata))
+
+# === Leggi i dati di conteggio ===
+read_featureCounts <- function(file_path) {
+  df <- read.table(file_path, header = TRUE, skip = 1, row.names = 1)
+  # Prendi l'ultima colonna (quella dei conteggi reali relativi al BAM)
+  count_col <- df[, ncol(df), drop = FALSE]
+  # Rinomina la colonna pulendo il path per farla combaciare con l'ID univoco del file
+  colnames(count_col) <- file_path_sans_ext(basename(file_path))
+  return(count_col)
+}
+
+count_list <- lapply(sample_table$file, read_featureCounts)
+count_matrix <- do.call(cbind, count_list)
+
+# Allinea perfettamente la sample_table alle colonne della count_matrix
+sample_table$raw_sample <- file_path_sans_ext(basename(sample_table$file))
+sample_table <- sample_table[match(colnames(count_matrix), sample_table$raw_sample), ]
+
+# Converte le colonne dei metadati in fattori
+sample_table$batch <- as.factor(sample_table$batch)
+sample_table$condition <- as.factor(sample_table$condition)
+
+# === Configurazione automatica del Design di DESeq2 ===
+# Se c'è solo 1 batch, il design "~ batch + condition" fallisce. Lo correggiamo dinamicamente.
+if (length(unique(sample_table$batch)) > 1) {
+  design_formula <- ~ batch + condition
+  cat("Rilevati modifiche batch multipli. Uso del design: ~ batch + condition\n")
+} else {
+  design_formula <- ~ condition
+  cat("Rilevato un singolo batch. Uso del design semplificato: ~ condition\n")
+}
+
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_matrix),
+  colData = sample_table[, c("sample", "batch", "condition")],
+  design = design_formula
+)
+
+# Esegui DESeq2
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", treatment, control))
+
+# Salvataggio Output Standard
+write.csv(as.data.frame(res), file = file.path(work_dir, "deseq_results.csv"))
+write.csv(sample_table, file = file.path(work_dir, "samples_metadata.csv"), row.names = FALSE)
+
+# ============================================================
+# CREAZIONE MATRICE INPUT PRONTA PER IPA (QIAGEN)
+# ============================================================
+cat("Generazione del file di input ottimizzato per IPA Qiagen...\n")
+
+res_df <- as.data.frame(res)
+
+# Calcolo del Fold Change Lineare classico richiesto da IPA
+# Se log2FC >= 0 -> 2^log2FC; Se log2FC < 0 -> -1 / (2^log2FC)
+res_df$Fold_Change_Linear <- ifelse(res_df$log2FoldChange >= 0, 
+                                    2^(res_df$log2FoldChange), 
+                                    -1 / (2^(res_df$log2FoldChange)))
+
+# Costruiamo il dataframe esattamente con la struttura attesa da IPA
+contrast_suffix <- paste0(treatment, "_vs_", control)
+ipa_input <- data.frame(
+  Gene_ID = rownames(res_df),
+  Expr_Log2_Fold_Change = res_df$log2FoldChange,
+  Expr_Fold_Change = res_df$Fold_Change_Linear,
+  Expr_p_value = res_df$pvalue,
+  Expr_FDR = res_df$padj,
+  stringsAsFactors = FALSE
+)
+
+# Rinominazione dinamica delle colonne per mostrare il contrasto specifico (es. DA_vs_SANO)
+colnames(ipa_input) <- c(
+  "Gene_ID", 
+  paste0("Expr Log2 Fold Change ", contrast_suffix),
+  paste0("Expr Fold Change ", contrast_suffix),
+  paste0("Expr p-value ", contrast_suffix),
+  paste0("Expr FDR ", contrast_suffix)
+)
+
+# Esportazione in formato tab-delimited (.txt) senza virgolette, perfetto per il caricamento su IPA
+write.table(
+  ipa_input,
+  file = file.path(work_dir, paste0("IPA_ready_input_", contrast_suffix, ".txt")),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# === Grafico PCA ===
+rld <- rlog(dds, blind = FALSE)
+pcaData <- plotPCA(rld, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+p <- ggplot(pcaData, aes(PC1, PC2, color = condition)) +
+  geom_point(size = 4) +
+  xlab(paste0("PC1: ", percentVar[1], "%")) +
+  ylab(paste0("PC2: ", percentVar[2], "%")) +
+  theme_minimal() +
+  ggtitle("PCA Plot")
+ggsave(filename = file.path(work_dir, "PCA_plot.png"), plot = p, width = 6, height = 5)
+
+# === Heatmap ===
+top_genes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 30)
+mat <- assay(rld)[top_genes, ]
+mat <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(rld)[, c("condition", "batch")])
+pheatmap(mat, annotation_col = anno,
+         fontsize_row = 8, cluster_cols = TRUE,
+         filename = file.path(work_dir, "Heatmap_top30.png"))
+
+# === Volcano Plot ===
+res_df$gene <- rownames(res_df)
+res_df$threshold <- as.factor(!is.na(res_df$padj) & res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1)
+
+volcano <- ggplot(res_df, aes(log2FoldChange, -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("FALSE" = "grey", "TRUE" = "red")) +
+  theme_minimal() +
+  xlab("log2 Fold Change") +
+  ylab("-log10 adjusted p-value") +
+  ggtitle("Volcano Plot") +
+  theme(legend.position = "none")
+ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano, width = 6, height = 5)
+
+cat("Tutti i file di output e i grafici R sono stati salvati correttamente.\n")
