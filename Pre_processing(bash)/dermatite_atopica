@@ -47,6 +47,9 @@ cd "$WORK_DIR" || { echo "Errore: non trovo $WORK_DIR"; exit 1; }
 echo "Salvataggio output in: $WORK_DIR"
 # ==================================================
 
+eval "$(mamba shell hook --shell bash)"
+mamba activate nanopore_bulk_ok
+
 #############################
 ########### QC #############
 #############################
