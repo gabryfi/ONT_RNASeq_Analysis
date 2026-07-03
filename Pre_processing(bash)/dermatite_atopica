@@ -6,8 +6,6 @@ shopt -s nullglob
 # ==============================================================================
 # CONTROLLO PERMESSI DI AMMINISTRATORE (SUDO)
 # ==============================================================================
-# Questo blocco verifica se lo script è stato lanciato con sudo (UID = 0).
-# Se NO, si interrompe immediatamente spiegando come lanciarlo.
 if [ "$EUID" -ne 0 ]; then
   echo "❌ ERRORE: Questo script deve essere eseguito come amministratore (sudo)."
   echo "👉 Usa il comando: sudo ./pipeline_bulk_da_vs_sano.sh"
@@ -33,11 +31,8 @@ GTF="/home/user/reference/gtf_human/BULK_HUMAN_G38.gtf"
 # ==================================================
 
 # ======== GESTIONE PERMESSI E CARTELLE ============
-# Imposta la maschera a 000 in modo che OGNI nuovo file/cartella creato da 
-# NanoPlot, samtools, featureCounts o R sia leggibile e modificabile da TUTTI (permessi 777 automatici)
 umask 000
 
-# Trova la cartella di lavoro (2 livelli sopra FASTQ_DIR)
 WORK_DIR="$(dirname "$(dirname "$FASTQ_DIR")")"
 
 echo "Sblocco ricorsivo della cartella di lavoro esistente..."
@@ -58,9 +53,7 @@ mamba activate nanopore_bulk_ok
 for barcode in $CONTROL_BARCODES; do
     echo "Processing $barcode ($CONTROL_LABEL):"
     
-    # Avendo i privilegi di root, zcat leggerà i fastq del sequenziatore senza problemi
     zcat "$FASTQ_DIR/barcode${barcode}"/*.fastq.gz > ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_combined.fastq
-    # Sblocca subito il file combinato appena creato per sicurezza
     chmod 777 ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_combined.fastq
 
     echo "QC for $barcode:"
@@ -122,15 +115,16 @@ done
 
 echo "Starting alignment with reference $REF..."
 
+# Sostituito -uf con l'opzione corretta per reads pre-orientate (Full-Length da Pychopper)
 for barcode in $CONTROL_BARCODES; do
     echo "Aligning barcode $barcode ($CONTROL_LABEL)..."
-    minimap2 -t "$THREADS" -a -x splice -uf --secondary=no "$REF" \
+    minimap2 -t "$THREADS" -a -x splice --secondary=no "$REF" \
         ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_full_length.fastq > ${BATCH_NAME}_barcode_${barcode}_${CONTROL_LABEL}_aln.sam
 done
 
 for barcode in $TREATMENT_BARCODES; do
     echo "Aligning barcode $barcode ($TREATMENT_LABEL)..."
-    minimap2 -t "$THREADS" -a -x splice -uf --secondary=no "$REF" \
+    minimap2 -t "$THREADS" -a -x splice --secondary=no "$REF" \
         ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_full_length.fastq > ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_aln.sam
 done
 
@@ -183,7 +177,6 @@ done
 echo "Lancio analisi DESeq2 su tutti i counts in: $WORK_DIR"
 Rscript "$R_DIR" "$WORK_DIR" "$TREATMENT_LABEL" "$CONTROL_LABEL"
 
-# Un ultimo sblocco totale di sicurezza su tutti i file generati (inclusi i grafici di R)
 chmod -R 777 "$WORK_DIR"
 
 echo "Analisi completata con successo! Tutti i file sono stati liberalmente sbloccati (777)."
