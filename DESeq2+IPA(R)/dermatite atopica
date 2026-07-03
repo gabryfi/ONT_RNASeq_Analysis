@@ -8,9 +8,10 @@ suppressMessages({
   library(ggplot2)
   library(matrixStats)
   library(RColorBrewer)
+  library(dplyr) # Caricato per allineamento alle funzioni di LORE (es. %>%)
 })
 
-# === PARAMETRI ===
+# === PARAMETRI DA TERMINALE ===
 args <- commandArgs(trailingOnly = TRUE)
 
 if (length(args) != 3) {
@@ -21,14 +22,14 @@ work_dir  <- args[1]
 treatment <- args[2]
 control   <- args[3]
 
-# === Trova tutti i file *_counts.txt ===
+# === 1. LETTURA FILE CONTEGGI ===
 count_files <- list.files(work_dir, pattern = "_counts\\.txt$", full.names = TRUE)
 if (length(count_files) == 0) stop("Nessun file *_counts.txt trovato nella cartella di lavoro.")
 
-# === Estrai metadati da filename ===
+# Estrazione metadati dal nome del file
 extract_metadata <- function(filename) {
   base <- basename(filename)
-  name <- file_path_sans_ext(base) # Rimuove l'estensione .txt
+  name <- file_path_sans_ext(base)
   parts <- str_split(name, "_")[[1]]
   
   batch     <- parts[1]
@@ -41,12 +42,10 @@ extract_metadata <- function(filename) {
 
 sample_table <- do.call(rbind, lapply(count_files, extract_metadata))
 
-# === Leggi i dati di conteggio ===
+# Lettura delle matrici di featureCounts
 read_featureCounts <- function(file_path) {
   df <- read.table(file_path, header = TRUE, skip = 1, row.names = 1)
-  # Prendi l'ultima colonna (quella dei conteggi reali relativi al BAM)
   count_col <- df[, ncol(df), drop = FALSE]
-  # Rinomina la colonna pulendo il path per farla combaciare con l'ID univoco del file
   colnames(count_col) <- file_path_sans_ext(basename(file_path))
   return(count_col)
 }
@@ -54,22 +53,18 @@ read_featureCounts <- function(file_path) {
 count_list <- lapply(sample_table$file, read_featureCounts)
 count_matrix <- do.call(cbind, count_list)
 
-# Allinea perfettamente la sample_table alle colonne della count_matrix
+# Allineamento perfetto sample_table <-> count_matrix
 sample_table$raw_sample <- file_path_sans_ext(basename(sample_table$file))
 sample_table <- sample_table[match(colnames(count_matrix), sample_table$raw_sample), ]
 
-# Converte le colonne dei metadati in fattori
 sample_table$batch <- as.factor(sample_table$batch)
 sample_table$condition <- as.factor(sample_table$condition)
 
-# === Configurazione automatica del Design di DESeq2 ===
-# Se c'è solo 1 batch, il design "~ batch + condition" fallisce. Lo correggiamo dinamicamente.
+# === 2. COSTRUZIONE OGGETTO DESEQ2 & FILTRAGGIO (ALLINEATO A LORE) ===
 if (length(unique(sample_table$batch)) > 1) {
   design_formula <- ~ batch + condition
-  cat("Rilevati modifiche batch multipli. Uso del design: ~ batch + condition\n")
 } else {
   design_formula <- ~ condition
-  cat("Rilevato un singolo batch. Uso del design semplificato: ~ condition\n")
 }
 
 dds <- DESeqDataSetFromMatrix(
@@ -78,28 +73,28 @@ dds <- DESeqDataSetFromMatrix(
   design = design_formula
 )
 
-# Esegui DESeq2
+# [FILTRO LORE]: Mantiene solo i geni che hanno un totale di almeno 10 reads tra tutti i campioni
+cat("[INFO] Applicazione filtro di LORE: rimozione geni con rowSums < 10...\n")
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+# === 3. ANALISI STATISTICA ===
 dds <- DESeq(dds)
 res <- results(dds, contrast = c("condition", treatment, control))
 
-# Salvataggio Output Standard
+# Salvataggio output grezzi tabellari
 write.csv(as.data.frame(res), file = file.path(work_dir, "deseq_results.csv"))
 write.csv(sample_table, file = file.path(work_dir, "samples_metadata.csv"), row.names = FALSE)
 
-# ============================================================
-# CREAZIONE MATRICE INPUT PRONTA PER IPA (QIAGEN)
-# ============================================================
-cat("Generazione del file di input ottimizzato per IPA Qiagen...\n")
-
+# === 4. GENERAZIONE MATRICE PRONTA PER IPA (QIAGEN) ===
+cat("[INFO] Generazione del file di input ottimizzato per IPA Qiagen...\n")
 res_df <- as.data.frame(res)
 
-# Calcolo del Fold Change Lineare classico richiesto da IPA
-# Se log2FC >= 0 -> 2^log2FC; Se log2FC < 0 -> -1 / (2^log2FC)
+# Calcolo matematico del Fold Change Lineare classico partendo dal log2FC
 res_df$Fold_Change_Linear <- ifelse(res_df$log2FoldChange >= 0, 
                                     2^(res_df$log2FoldChange), 
                                     -1 / (2^(res_df$log2FoldChange)))
 
-# Costruiamo il dataframe esattamente con la struttura attesa da IPA
 contrast_suffix <- paste0(treatment, "_vs_", control)
 ipa_input <- data.frame(
   Gene_ID = rownames(res_df),
@@ -110,7 +105,6 @@ ipa_input <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Rinominazione dinamica delle colonne per mostrare il contrasto specifico (es. DA_vs_SANO)
 colnames(ipa_input) <- c(
   "Gene_ID", 
   paste0("Expr Log2 Fold Change ", contrast_suffix),
@@ -119,7 +113,6 @@ colnames(ipa_input) <- c(
   paste0("Expr FDR ", contrast_suffix)
 )
 
-# Esportazione in formato tab-delimited (.txt) senza virgolette, perfetto per il caricamento su IPA
 write.table(
   ipa_input,
   file = file.path(work_dir, paste0("IPA_ready_input_", contrast_suffix, ".txt")),
@@ -128,19 +121,19 @@ write.table(
   row.names = FALSE
 )
 
-# === Grafico PCA ===
+# === 5. GRAFICI: PCA & HEATMAP ===
 rld <- rlog(dds, blind = FALSE)
 pcaData <- plotPCA(rld, intgroup = "condition", returnData = TRUE)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
-p <- ggplot(pcaData, aes(PC1, PC2, color = condition)) +
+
+p_pca <- ggplot(pcaData, aes(PC1, PC2, color = condition)) +
   geom_point(size = 4) +
   xlab(paste0("PC1: ", percentVar[1], "%")) +
   ylab(paste0("PC2: ", percentVar[2], "%")) +
   theme_minimal() +
   ggtitle("PCA Plot")
-ggsave(filename = file.path(work_dir, "PCA_plot.png"), plot = p, width = 6, height = 5)
+ggsave(filename = file.path(work_dir, "PCA_plot.png"), plot = p_pca, width = 6, height = 5)
 
-# === Heatmap ===
 top_genes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 30)
 mat <- assay(rld)[top_genes, ]
 mat <- mat - rowMeans(mat)
@@ -149,18 +142,51 @@ pheatmap(mat, annotation_col = anno,
          fontsize_row = 8, cluster_cols = TRUE,
          filename = file.path(work_dir, "Heatmap_top30.png"))
 
-# === Volcano Plot ===
-res_df$gene <- rownames(res_df)
-res_df$threshold <- as.factor(!is.na(res_df$padj) & res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1)
+# === 6. GRAFICO: VOLCANO PLOT (ALLINEATO A PARAMETRI E COLORI LORE) ===
+cat("[INFO] Generazione Volcano Plot con impostazioni grafiche di LORE...\n")
 
-volcano <- ggplot(res_df, aes(log2FoldChange, -log10(padj), color = threshold)) +
-  geom_point(alpha = 0.6) +
-  scale_color_manual(values = c("FALSE" = "grey", "TRUE" = "red")) +
+# Creazione del set di dati specifico per il Volcano (chiamato 'vol' come fa LORE)
+vol <- as.data.frame(res)
+vol$ID <- rownames(vol)
+vol$lfc <- vol$log2FoldChange
+
+# Definizione dei tre gruppi di categorizzazione e colorazione di LORE (padj < 0.05 e |log2FC| > 1)
+vol$gene_type <- "Not Significant"
+vol$gene_type[vol$lfc > 1 & vol$padj < 0.05] <- "Upregulated"
+vol$gene_type[vol$lfc < -1 & vol$padj < 0.05] <- "Downregulated"
+
+# Conversione a fattore per bloccare i livelli grafici
+vol$gene_type <- factor(vol$gene_type, levels = c("Upregulated", "Downregulated", "Not Significant"))
+
+# Creazione del plot applicando i parametri di LORE: xlim(-20,20), alpha e shape dedicati
+volcano_plot <- vol %>%
+  filter(!is.na(padj)) %>% # Rimuove i valori NA per evitare buchi nel grafico
+  ggplot(aes(x = lfc,
+             y = -log10(padj),
+             colour = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 16) +  
+  xlim(-20, 20) + # [BLOCCO ASSE LORE]
+  scale_colour_manual(values = c("Upregulated" = "red", 
+                                 "Downregulated" = "blue", 
+                                 "Not Significant" = "grey")) +
+  scale_size_manual(values = c("Upregulated" = 2, 
+                               "Downregulated" = 2, 
+                               "Not Significant" = 1)) +
+  scale_alpha_manual(values = c("Upregulated" = 1, 
+                                "Downregulated" = 1, 
+                                "Not Significant" = 0.4)) +
   theme_minimal() +
   xlab("log2 Fold Change") +
   ylab("-log10 adjusted p-value") +
-  ggtitle("Volcano Plot") +
-  theme(legend.position = "none")
-ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano, width = 6, height = 5)
+  ggtitle(paste0("Volcano Plot: ", contrast_suffix)) +
+  theme(legend.title = element_blank())
 
-cat("Tutti i file di output e i grafici R sono stati salvati correttamente.\n")
+# Salvataggio del grafico Volcano in PNG (e anche in SVG come faceva LORE)
+ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano_plot, width = 7, height = 6)
+svg(file.path(work_dir, "volcano_labelled.svg"), width = 8, height = 8)
+print(volcano_plot)
+dev.off()
+
+cat("[SUCCESS] Script R completato. Tutti i file salvati nella cartella di lavoro.\n")
