@@ -152,8 +152,8 @@ vol$lfc <- vol$log2FoldChange
 
 # Definizione dei tre gruppi di categorizzazione e colorazione di LORE (padj < 0.05 e |log2FC| > 1)
 vol$gene_type <- "Not Significant"
-vol$gene_type[vol$lfc > 1 & vol$padj < 0.05] <- "Upregulated"
-vol$gene_type[vol$lfc < -1 & vol$padj < 0.05] <- "Downregulated"
+vol$gene_type[vol$lfc > 0.58 & vol$padj < 0.05] <- "Upregulated"
+vol$gene_type[vol$lfc < -0.58 & vol$padj < 0.05] <- "Downregulated"
 
 # Conversione a fattore per bloccare i livelli grafici
 vol$gene_type <- factor(vol$gene_type, levels = c("Upregulated", "Downregulated", "Not Significant"))
