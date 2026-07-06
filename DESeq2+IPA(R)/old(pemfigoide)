@@ -1,0 +1,104 @@
+# deseq_auto_import.R:
+
+#!/usr/bin/env Rscript
+
+suppressMessages({
+  library(DESeq2)
+  library(stringr)
+  library(tools)
+  library(pheatmap)
+  library(ggplot2)
+  library(matrixStats)
+  library(RColorBrewer)
+})
+
+# === PARAMETRO UNICO ===
+args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) != 3) {
+  stop("Uso: Rscript deseq_auto_import.R /percorso/a/WORK_DIR")
+}
+work_dir <- args[1]
+treatment <- args[2]
+control <- args[3]
+
+# === Trova tutti i file *_counts.txt ===
+count_files <- list.files(work_dir, pattern = "_counts\\.txt$", full.names = TRUE)
+if (length(count_files) == 0) stop("Nessun file *_counts.txt trovato nel path.")
+
+# === Estrai metadati da filename ===
+extract_metadata <- function(filename) {
+  base <- basename(filename)
+  name <- file_path_sans_ext(base)
+  parts <- str_split(name, "_")[[1]]
+  batch <- parts[1]
+  barcode <- parts[3]
+  condition <- parts[4]
+  sample <- paste(batch, "bc", barcode, condition, sep = "_")
+  return(data.frame(sample = sample, batch = batch, condition = condition, file = filename))
+}
+
+sample_table <- do.call(rbind, lapply(count_files, extract_metadata))
+
+# === Leggi i dati di conteggio ===
+read_featureCounts <- function(file_path) {
+  df <- read.table(file_path, header = TRUE, skip = 1, row.names = 1)
+  df <- df[, ncol(df), drop = FALSE]
+  colnames(df) <- file_path_sans_ext(basename(file_path))
+  return(df)
+}
+
+count_list <- lapply(sample_table$file, read_featureCounts)
+count_matrix <- do.call(cbind, count_list)
+
+# Ordina sample_table come count_matrix
+sample_table$raw_sample <- file_path_sans_ext(basename(sample_table$file))
+sample_table <- sample_table[match(colnames(count_matrix), sample_table$raw_sample), ]
+
+# DESeq2
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_matrix),
+  colData = sample_table[, c("sample", "batch", "condition")],
+  design = ~ batch + condition
+)
+
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", treatment, control))
+write.csv(as.data.frame(res), file = file.path(work_dir, "deseq_results.csv"))
+write.csv(sample_table, file = file.path(work_dir, "samples_metadata.csv"), row.names = FALSE)
+
+# === PCA plot ===
+rld <- rlog(dds, blind = FALSE)
+pcaData <- plotPCA(rld, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+p <- ggplot(pcaData, aes(PC1, PC2, color = condition)) +
+  geom_point(size = 4) +
+  xlab(paste0("PC1: ", percentVar[1], "%")) +
+  ylab(paste0("PC2: ", percentVar[2], "%")) +
+  theme_minimal() +
+  ggtitle("PCA Plot")
+ggsave(filename = file.path(work_dir, "PCA_plot.png"), plot = p, width = 6, height = 5)
+
+# === Heatmap ===
+top_genes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 30)
+mat <- assay(rld)[top_genes, ]
+mat <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(rld)[, c("condition", "batch")])
+pheatmap(mat, annotation_col = anno,
+         fontsize_row = 8, cluster_cols = TRUE,
+         filename = file.path(work_dir, "Heatmap_top30.png"))
+
+# === Volcano Plot ===
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+res_df$threshold <- as.factor(res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1)
+
+volcano <- ggplot(res_df, aes(log2FoldChange, -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("FALSE" = "grey", "TRUE" = "red")) +
+  theme_minimal() +
+  xlab("log2 Fold Change") +
+  ylab("-log10 adjusted p-value") +
+  ggtitle("Volcano Plot") +
+  theme(legend.position = "none")
+ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano, width = 6, height = 5)
