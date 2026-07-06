@@ -182,7 +182,7 @@ volcano_plot <- vol %>%
              size = gene_type,
              alpha = gene_type)) + 
   geom_point(shape = 16) +  
-  xlim(-x_limit, x_limit) + 
+  xlim(-25, 25) + 
   scale_colour_manual(values = c("Upregulated" = "blue",        # Richiesta: Upregulated = Blu
                                  "Downregulated" = "red",       # Richiesta: Downregulated = Rosso
                                  "Not Significant" = "grey"),
