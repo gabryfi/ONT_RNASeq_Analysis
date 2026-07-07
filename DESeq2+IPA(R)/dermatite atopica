@@ -8,7 +8,7 @@ suppressMessages({
   library(ggplot2)
   library(matrixStats)
   library(RColorBrewer)
-  library(dplyr) # Caricato per allineamento alle funzioni di LORE (es. %>%)
+  library(dplyr)
 })
 
 # === PARAMETRI DA TERMINALE ===
@@ -31,6 +31,10 @@ extract_metadata <- function(filename) {
   base <- basename(filename)
   name <- file_path_sans_ext(base)
   parts <- str_split(name, "_")[[1]]
+  
+  if (length(parts) < 4) {
+    stop(paste("Errore: Il nome del file", base, "non segue il formato atteso (BATCH_X_BARCODE_CONDITION_counts.txt)"))
+  }
   
   batch     <- parts[1]
   barcode   <- parts[3]
@@ -60,11 +64,13 @@ sample_table <- sample_table[match(colnames(count_matrix), sample_table$raw_samp
 sample_table$batch <- as.factor(sample_table$batch)
 sample_table$condition <- as.factor(sample_table$condition)
 
-# === 2. COSTRUZIONE OGGETTO DESEQ2 & FILTRAGGIO (ALLINEATO A LORE) ===
+# === 2. COSTRUZIONE OGGETTO DESEQ2 & FILTRAGGIO ===
 if (length(unique(sample_table$batch)) > 1) {
   design_formula <- ~ batch + condition
+  cat("[INFO] Rilevati più batch. Modello applicato: ~ batch + condition\n")
 } else {
   design_formula <- ~ condition
+  cat("[INFO] Rilevato un singolo batch. Modello applicato: ~ condition\n")
 }
 
 dds <- DESeqDataSetFromMatrix(
@@ -73,8 +79,8 @@ dds <- DESeqDataSetFromMatrix(
   design = design_formula
 )
 
-# [FILTRO LORE]: Mantiene solo i geni che hanno un totale di almeno 10 reads tra tutti i campioni
-cat("[INFO] Applicazione filtro di LORE: rimozione geni con rowSums < 10...\n")
+# Filtro geni con basso numero di reads totali (rowSums >= 10)
+cat("[INFO] Applicazione filtro: rimozione geni con rowSums < 10...\n")
 keep <- rowSums(counts(dds)) >= 10
 dds <- dds[keep, ]
 
@@ -90,7 +96,6 @@ write.csv(sample_table, file = file.path(work_dir, "samples_metadata.csv"), row.
 cat("[INFO] Generazione del file di input ottimizzato per IPA Qiagen...\n")
 res_df <- as.data.frame(res)
 
-# Calcolo matematico del Fold Change Lineare classico partendo dal log2FC
 res_df$Fold_Change_Linear <- ifelse(res_df$log2FoldChange >= 0, 
                                     2^(res_df$log2FoldChange), 
                                     -1 / (2^(res_df$log2FoldChange)))
@@ -121,8 +126,10 @@ write.table(
   row.names = FALSE
 )
 
-# === 5. GRAFICI: PCA & HEATMAP ===
+# === 5. GRAFICI: PCA & HEATMAP (CON COESIONE COLORI) ===
 rld <- rlog(dds, blind = FALSE)
+
+# PCA Plot
 pcaData <- plotPCA(rld, intgroup = "condition", returnData = TRUE)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
 
@@ -134,59 +141,70 @@ p_pca <- ggplot(pcaData, aes(PC1, PC2, color = condition)) +
   ggtitle("PCA Plot")
 ggsave(filename = file.path(work_dir, "PCA_plot.png"), plot = p_pca, width = 6, height = 5)
 
+# Heatmap con Palette Blu (Espressi) -> Bianco -> Rosso (Repressi)
 top_genes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 30)
 mat <- assay(rld)[top_genes, ]
 mat <- mat - rowMeans(mat)
 anno <- as.data.frame(colData(rld)[, c("condition", "batch")])
+
+# Inversione palette: valori alti/up (Blu), valori bassi/down (Rosso)
+heatmap_colors <- colorRampPalette(c("red", "white", "blue"))(50)
+
 pheatmap(mat, annotation_col = anno,
+         color = heatmap_colors,
          fontsize_row = 8, cluster_cols = TRUE,
          filename = file.path(work_dir, "Heatmap_top30.png"))
 
-# === 6. GRAFICO: VOLCANO PLOT (ALLINEATO A PARAMETRI E COLORI LORE) ===
-cat("[INFO] Generazione Volcano Plot con impostazioni grafiche di LORE...\n")
+# === 6. GRAFICO: VOLCANO PLOT (INVERSIONE COLORI CHIESTA: UP=BLU, DOWN=ROSSO) ===
+cat("[INFO] Generazione Volcano Plot...\n")
 
-# Creazione del set di dati specifico per il Volcano (chiamato 'vol' come fa LORE)
 vol <- as.data.frame(res)
 vol$ID <- rownames(vol)
 vol$lfc <- vol$log2FoldChange
 
-# Definizione dei tre gruppi di categorizzazione e colorazione di LORE (padj < 0.05 e |log2FC| > 1)
+# Categorizzazione basata su p-adjusted e log2FC
 vol$gene_type <- "Not Significant"
-vol$gene_type[vol$lfc > 0.58 & vol$padj < 0.05] <- "Upregulated"
-vol$gene_type[vol$lfc < -0.58 & vol$padj < 0.05] <- "Downregulated"
+vol$gene_type[vol$lfc > 0.58 & !is.na(vol$padj) & vol$padj < 0.05] <- "Upregulated"
+vol$gene_type[vol$lfc < -0.58 & !is.na(vol$padj) & vol$padj < 0.05] <- "Downregulated"
 
-# Conversione a fattore per bloccare i livelli grafici
+# Forzo i livelli per mantenere la coerenza grafica
 vol$gene_type <- factor(vol$gene_type, levels = c("Upregulated", "Downregulated", "Not Significant"))
 
-# Creazione del plot applicando i parametri di LORE: xlim(-20,20), alpha e shape dedicati
+# Calcolo dinamico dei limiti dell'asse X per evitare tagli indiscriminati di geni importanti
+max_lfc <- max(abs(vol$lfc), na.rm = TRUE)
+x_limit <- ceiling(min(max(max_lfc, 5), 30)) # Adattivo ma controllato (minimo 5, massimo 30)
+
 volcano_plot <- vol %>%
-  filter(!is.na(padj)) %>% # Rimuove i valori NA per evitare buchi nel grafico
+  filter(!is.na(padj)) %>% 
   ggplot(aes(x = lfc,
              y = -log10(padj),
              colour = gene_type,    
              size = gene_type,
              alpha = gene_type)) + 
   geom_point(shape = 16) +  
-  xlim(-20, 20) + # [BLOCCO ASSE LORE]
-  scale_colour_manual(values = c("Upregulated" = "red", 
-                                 "Downregulated" = "blue", 
-                                 "Not Significant" = "grey")) +
+  xlim(-25, 25) + 
+  scale_colour_manual(values = c("Upregulated" = "blue",        # Richiesta: Upregulated = Blu
+                                 "Downregulated" = "red",       # Richiesta: Downregulated = Rosso
+                                 "Not Significant" = "grey"),
+                      drop = FALSE) + 
   scale_size_manual(values = c("Upregulated" = 2, 
                                "Downregulated" = 2, 
-                               "Not Significant" = 1)) +
+                               "Not Significant" = 1),
+                    drop = FALSE) +
   scale_alpha_manual(values = c("Upregulated" = 1, 
                                 "Downregulated" = 1, 
-                                "Not Significant" = 0.4)) +
+                               "Not Significant" = 0.4),
+                     drop = FALSE) +
   theme_minimal() +
   xlab("log2 Fold Change") +
   ylab("-log10 adjusted p-value") +
   ggtitle(paste0("Volcano Plot: ", contrast_suffix)) +
   theme(legend.title = element_blank())
 
-# Salvataggio del grafico Volcano in PNG (e anche in SVG come faceva LORE)
+# Salvataggio file grafici
 ggsave(file.path(work_dir, "Volcano_plot.png"), plot = volcano_plot, width = 7, height = 6)
 svg(file.path(work_dir, "volcano_labelled.svg"), width = 8, height = 8)
 print(volcano_plot)
 dev.off()
 
-cat("[SUCCESS] Script R completato. Tutti i file salvati nella cartella di lavoro.\n")
+cat("[SUCCESS] Script R completato con successo. Tutti i file salvati.\n")
