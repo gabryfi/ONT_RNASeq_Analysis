@@ -42,8 +42,28 @@ cd "$WORK_DIR" || { echo "Errore: non trovo $WORK_DIR"; exit 1; }
 echo "Salvataggio output in: $WORK_DIR"
 # ==================================================
 
-eval "$(mamba shell hook --shell bash)"
-mamba activate nanopore_bulk_ok
+# ==============================================================================
+# ATTIVAZIONE AMBIENTE CONDA/MAMBA
+# ==============================================================================
+
+CONDA_BASE="/home/user/miniconda3"
+
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+
+conda activate nanopore_bulk_stable
+
+echo "Ambiente Conda attivo:"
+which python
+python --version
+
+
+echo "Python : $(which python)"
+echo "Rscript: $(which Rscript)"
+echo "NanoPlot: $(which NanoPlot)"
+echo "minimap2: $(which minimap2)"
+echo "samtools: $(which samtools)"
+echo "featureCounts: $(which featureCounts)"
+
 
 #############################
 ########### QC #############
@@ -169,6 +189,7 @@ for barcode in $TREATMENT_BARCODES; do
         -a "$GTF" -o ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_counts.txt \
         -t exon -g gene_id ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_sorted.bam
 done
+
 
 #############################
 ########### DESeq ###########
