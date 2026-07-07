@@ -189,8 +189,7 @@ for barcode in $TREATMENT_BARCODES; do
         -a "$GTF" -o ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_counts.txt \
         -t exon -g gene_id ${BATCH_NAME}_barcode_${barcode}_${TREATMENT_LABEL}_sorted.bam
 done
-
-
+e
 #############################
 ########### DESeq ###########
 #############################
