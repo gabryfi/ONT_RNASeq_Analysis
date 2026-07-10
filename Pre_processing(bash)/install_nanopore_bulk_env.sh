@@ -20,13 +20,16 @@ IFS=$'\n\t'
 # Lo script:
 #   1. installa le dipendenze Ubuntu/Debian;
 #   2. installa Miniforge 26.3.2-3 con SHA-256 ufficiale incorporato;
-#   3. elimina e ricrea da zero i tre ambienti della pipeline;
+#   3. elimina e ricrea da zero i quattro ambienti della pipeline;
 #   4. verifica i programmi con i comandi ufficiali;
 #   5. esporta file di lock riproducibili.
 #
 # Ambienti:
 #   nanopore_bulk_stable
-#       NanoPlot, Pychopper, minimap2, samtools, featureCounts
+#       NanoPlot, minimap2, samtools, featureCounts
+#
+#   nanopore_pychopper
+#       Pychopper 2.7.10 con pandas 2.3.3 compatibile con i report
 #
 #   nanopore_fastcat
 #       fastcat isolato, secondo la documentazione Oxford Nanopore
@@ -34,10 +37,11 @@ IFS=$'\n\t'
 #   nanopore_deseq2
 #       R, DESeq2 e pacchetti R
 #
-# La pipeline deve attivare solamente nanopore_bulk_stable.
+# La pipeline attiva l'ambiente richiesto in ciascuna fase.
 # ==============================================================================
 
 MAIN_ENV_NAME="nanopore_bulk_stable"
+PYCHOPPER_ENV_NAME="nanopore_pychopper"
 FASTCAT_ENV_NAME="nanopore_fastcat"
 R_ENV_NAME="nanopore_deseq2"
 
@@ -45,6 +49,7 @@ PYTHON_VERSION="3.11"
 PYSAM_VERSION="0.24.0"
 NANOPLOT_VERSION="1.47.1"
 PYCHOPPER_VERSION="2.7.10"
+PANDAS_VERSION="2.3.3"
 MINIMAP2_VERSION="2.31"
 SAMTOOLS_VERSION="1.23.1"
 SUBREAD_VERSION="2.1.1"
@@ -163,6 +168,7 @@ CONDA="${MINIFORGE_DIR}/bin/conda"
 MAMBA="${MINIFORGE_DIR}/bin/mamba"
 
 MAIN_ENV_DIR="${MINIFORGE_DIR}/envs/${MAIN_ENV_NAME}"
+PYCHOPPER_ENV_DIR="${MINIFORGE_DIR}/envs/${PYCHOPPER_ENV_NAME}"
 FASTCAT_ENV_DIR="${MINIFORGE_DIR}/envs/${FASTCAT_ENV_NAME}"
 R_ENV_DIR="${MINIFORGE_DIR}/envs/${R_ENV_NAME}"
 
@@ -177,6 +183,7 @@ log "Home utente         : ${TARGET_HOME}"
 log "Architettura        : ${ARCH}"
 log "Miniforge           : ${MINIFORGE_DIR}"
 log "Ambiente principale : ${MAIN_ENV_NAME}"
+log "Ambiente Pychopper  : ${PYCHOPPER_ENV_NAME}"
 log "Ambiente fastcat    : ${FASTCAT_ENV_NAME}"
 log "Ambiente R/DESeq2   : ${R_ENV_NAME}"
 
@@ -292,6 +299,7 @@ remove_environment() {
 }
 
 remove_environment "${MAIN_ENV_NAME}" "${MAIN_ENV_DIR}"
+remove_environment "${PYCHOPPER_ENV_NAME}" "${PYCHOPPER_ENV_DIR}"
 remove_environment "${FASTCAT_ENV_NAME}" "${FASTCAT_ENV_DIR}"
 remove_environment "${R_ENV_NAME}" "${R_ENV_DIR}"
 
@@ -318,7 +326,6 @@ run_user "${MAMBA}" create \
     "python=${PYTHON_VERSION}" \
     "pysam=${PYSAM_VERSION}" \
     "nanoplot=${NANOPLOT_VERSION}" \
-    "pychopper=${PYCHOPPER_VERSION}" \
     "minimap2=${MINIMAP2_VERSION}" \
     "samtools=${SAMTOOLS_VERSION}" \
     "subread=${SUBREAD_VERSION}" \
@@ -331,7 +338,33 @@ run_user "${MAMBA}" create \
 ok "Ambiente principale creato."
 
 # ==============================================================================
-# 7. AMBIENTE FASTCAT
+# 7. AMBIENTE PYCHOPPER
+#
+# Pychopper 2.7.10 usa ancora la conversione float(Series), deprecata in
+# pandas 2.x e rimossa in pandas 3.x. pandas 2.3.3 viene quindi fissato
+# esplicitamente nello stesso ambiente di Pychopper.
+# ==============================================================================
+
+log "Creazione dell'ambiente Pychopper..."
+
+run_user "${MAMBA}" create \
+    --yes \
+    --prefix "${PYCHOPPER_ENV_DIR}" \
+    --override-channels \
+    --strict-channel-priority \
+    --channel conda-forge \
+    --channel bioconda \
+    "python=${PYTHON_VERSION}" \
+    "pychopper=${PYCHOPPER_VERSION}" \
+    "pandas=${PANDAS_VERSION}"
+
+[[ -x "${PYCHOPPER_ENV_DIR}/bin/pychopper" ]] \
+    || die "L'ambiente Pychopper non è stato creato correttamente."
+
+ok "Ambiente Pychopper creato."
+
+# ==============================================================================
+# 8. AMBIENTE FASTCAT
 # ==============================================================================
 
 log "Creazione dell'ambiente fastcat..."
@@ -352,7 +385,7 @@ run_user "${MAMBA}" create \
 ok "Ambiente fastcat creato."
 
 # ==============================================================================
-# 8. AMBIENTE R / DESEQ2
+# 9. AMBIENTE R / DESEQ2
 # ==============================================================================
 
 log "Creazione dell'ambiente R/DESeq2..."
@@ -394,7 +427,7 @@ run_user "${MAMBA}" create \
 ok "Ambiente R/DESeq2 creato."
 
 # ==============================================================================
-# 9. WRAPPER NELL'AMBIENTE PRINCIPALE
+# 10. WRAPPER NELL'AMBIENTE PRINCIPALE
 # ==============================================================================
 
 log "Collegamento di fastcat, R e Rscript all'ambiente principale..."
@@ -434,17 +467,39 @@ fix_owner \
 ok "Wrapper creati."
 
 # ==============================================================================
-# 10. CONTROLLI STANDARD
+# 11. CONTROLLI STANDARD
 # ==============================================================================
 
 log "Controllo dei programmi installati..."
 
 run_user "${MAIN_ENV_DIR}/bin/python" --version
 run_user "${MAIN_ENV_DIR}/bin/NanoPlot" --version
-run_user "${MAIN_ENV_DIR}/bin/pychopper" --help >/dev/null
 run_user "${MAIN_ENV_DIR}/bin/minimap2" --version
 run_user "${MAIN_ENV_DIR}/bin/samtools" --version
 run_user "${MAIN_ENV_DIR}/bin/featureCounts" -v
+
+run_user "${PYCHOPPER_ENV_DIR}/bin/pychopper" --help >/dev/null
+
+run_user "${PYCHOPPER_ENV_DIR}/bin/python" - <<'PYCHOPPER_TEST'
+import warnings
+import pandas as pd
+
+expected = "2.3.3"
+
+if pd.__version__ != expected:
+    raise SystemExit(
+        f"Versione pandas inattesa: {pd.__version__}; attesa: {expected}"
+    )
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    value = float(pd.Series([1.0]))
+
+if value != 1.0:
+    raise SystemExit("Test di compatibilità pandas/Pychopper non riuscito.")
+
+print(f"Pychopper: ambiente OK; pandas {pd.__version__}")
+PYCHOPPER_TEST
 run_user "${MAIN_ENV_DIR}/bin/fastcat" fastq --version
 run_user "${MAIN_ENV_DIR}/bin/Rscript" --version
 
@@ -496,7 +551,7 @@ cat(
 ok "Tutti i programmi richiesti sono disponibili."
 
 # ==============================================================================
-# 11. FILE DI LOCK
+# 12. FILE DI LOCK
 # ==============================================================================
 
 log "Esportazione delle build installate..."
@@ -505,6 +560,11 @@ run_user "${CONDA}" list \
     --prefix "${MAIN_ENV_DIR}" \
     --explicit \
     > "${LOCK_DIR}/${MAIN_ENV_NAME}-${ARCH}.lock.txt"
+
+run_user "${CONDA}" list \
+    --prefix "${PYCHOPPER_ENV_DIR}" \
+    --explicit \
+    > "${LOCK_DIR}/${PYCHOPPER_ENV_NAME}-${ARCH}.lock.txt"
 
 run_user "${CONDA}" list \
     --prefix "${FASTCAT_ENV_DIR}" \
@@ -521,7 +581,7 @@ fix_owner "${INSTALL_DIR}"
 ok "File di lock creati in ${LOCK_DIR}."
 
 # ==============================================================================
-# 12. RISULTATO
+# 13. RISULTATO
 # ==============================================================================
 
 cat <<EOF
@@ -533,14 +593,18 @@ INSTALLAZIONE COMPLETATA
 Miniforge:
     ${MINIFORGE_DIR}
 
-Ambiente da attivare nella pipeline:
+Ambienti della pipeline:
     ${MAIN_ENV_NAME}
+    ${PYCHOPPER_ENV_NAME}
+    ${FASTCAT_ENV_NAME}
+    ${R_ENV_NAME}
 
-Configurazione della pipeline:
+Configurazione di base:
 
     CONDA_BASE="${MINIFORGE_DIR}"
     source "\${CONDA_BASE}/etc/profile.d/conda.sh"
-    conda activate "${MAIN_ENV_NAME}"
+
+La pipeline deve attivare ${PYCHOPPER_ENV_NAME} soltanto nella fase Pychopper.
 
 Sintassi fastcat:
 
