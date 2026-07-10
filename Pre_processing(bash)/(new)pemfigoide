@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 shopt -s nullglob
 
-# ==============================================================================
+# =============================================================================
 # PIPELINE NANOPORE BULK RNA-SEQ
 #
 # Ambienti Conda utilizzati, creati dall'installer:
@@ -36,7 +36,7 @@ TREATMENT_BARCODES=(07 08 09 10 11 13)
 BATCH_NAME="Batch1"
 THREADS=30
 
-R_SCRIPT="/home/lab-user/reference/deseq_auto_import.R"
+R_SCRIPT="/home/lab-user/reference/deseq_auto_import.r"
 REF="/home/lab-user/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
 GTF="/home/lab-user/reference/gtf_human/BULK_HUMAN_G38.gtf"
 
