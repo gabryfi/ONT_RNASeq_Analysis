@@ -11,14 +11,6 @@ shopt -s nullglob
 #   nanopore_bulk_stable : NanoPlot, Pychopper, minimap2, samtools, featureCounts
 #   nanopore_fastcat     : fastcat
 #   nanopore_deseq2      : R, Rscript, DESeq2
-#
-# ESECUZIONE:
-#   chmod +x pipeline_bulk_da_vs_sano.sh
-#   ./pipeline_bulk_da_vs_sano.sh
-#
-# NON eseguire questa pipeline con sudo.
-# sudo viene usato soltanto, se necessario, per concedere all'utente corrente
-# accesso in lettura e attraversamento alle cartelle FASTQ di input.
 # ==============================================================================
 
 # ==============================================================================
