@@ -5,321 +5,114 @@ IFS=$'\n\t'
 shopt -s nullglob
 
 # ==============================================================================
-# PIPELINE NANOPORE BULK RNA-SEQ
+# PIPELINE NANOPORE BULK RNA-SEQ — SEMPLICE, ROBUSTA E RIAVVIABILE
 #
-# Ambienti Conda utilizzati, creati dall'installer:
-#   nanopore_bulk_stable : NanoPlot, Pychopper, minimap2, samtools, featureCounts
-#   nanopore_fastcat     : fastcat
-#   nanopore_deseq2      : R, Rscript, DESeq2
+# FASTQ per barcode -> fastcat -> Pychopper -> minimap2/samtools
+# -> featureCounts -> DESeq2
+#
+# Questa copia è già configurata per riprendere:
+#   /home/lab-user/Scrivania/dermatite/Batch1_bulk_output_20260721_105453
+#
+# Basta eseguire lo script: gli output già completati vengono riutilizzati.
 # ==============================================================================
 
-# ==============================================================================
-# PARAMETRI DA MODIFICARE
-# ==============================================================================
+# --- Parametri principali ------------------------------------------------------
+FASTQ_DIR="${FASTQ_DIR:-/home/lab-user/Scrivania/dermatite/fastq_pass}"
 
-FASTQ_DIR="/home/lab-user/Scrivania/dermatite/fastq_pass"
-
-CONTROL_LABEL="SANO"
-TREATMENT_LABEL="DA"
+CONTROL_LABEL="${CONTROL_LABEL:-SANO}"
+TREATMENT_LABEL="${TREATMENT_LABEL:-DA}"
 
 CONTROL_BARCODES=(01 02 03 04 05)
 TREATMENT_BARCODES=(06 07 08 09 10 11 12 13 14)
 
-BATCH_NAME="Batch1"
-THREADS=30
+BATCH_NAME="${BATCH_NAME:-Batch1}"
+THREADS="${THREADS:-50}"
 
-R_SCRIPT="/home/lab-user/reference/deseq_auto_import.r"
-REF="/home/lab-user/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
-GTF="/home/lab-user/reference/gtf_human/BULK_HUMAN_G38.gtf"
+# Cartella della lavorazione da riprendere. Può ancora essere sovrascritta
+# passando OUTPUT_ROOT=/altro/percorso prima del comando.
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/lab-user/Scrivania/dermatite/Batch1_bulk_output_20260721_105453}"
 
-CONDA_BASE="/home/lab-user/miniforge3"
+# Script R robusto usato alla fine della pipeline.
+R_SCRIPT="${R_SCRIPT:-/home/lab-user/Scrivania/deseq_auto_import_robusto.r}"
+REF="${REF:-/home/lab-user/reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa}"
+GTF="${GTF:-/home/lab-user/reference/gtf_human/BULK_HUMAN_G38.gtf}"
 
-# Filtri fastcat.
-MIN_LENGTH=500
-MIN_QSCORE=10
+CONDA_BASE="${CONDA_BASE:-/home/lab-user/miniforge3}"
 
-# featureCounts:
-#   0 = unstranded
-#   1 = stranded
-#   2 = reverse-stranded
-# Il valore 0 conserva il comportamento della pipeline originale.
-FEATURECOUNTS_STRAND=0
+MIN_LENGTH="${MIN_LENGTH:-500}"
+MIN_QSCORE="${MIN_QSCORE:-10}"
+FEATURECOUNTS_STRAND="${FEATURECOUNTS_STRAND:-0}"
+RUN_DESEQ2="${RUN_DESEQ2:-1}"
 
-# Kit Pychopper opzionale.
-# Lasciare vuoto per usare il kit predefinito di Pychopper.
-# Esempio, solo se corrisponde realmente alla preparazione della libreria:
-# PYCHOPPER_KIT="PCB114"
-PYCHOPPER_KIT=""
+# Vuoto = kit predefinito di Pychopper.
+PYCHOPPER_KIT="${PYCHOPPER_KIT:-}"
 
-# Se impostato a 1, lo script prova a concedere all'utente corrente soltanto
-# lettura dei file e attraversamento delle directory FASTQ.
-# Non concede mai permessi di scrittura sugli input.
-AUTO_FIX_INPUT_PERMISSIONS=1
-
-# I FASTQ combinati sono temporanei e vengono eliminati dopo fastcat,
-# come nella pipeline originale.
-KEEP_COMBINED_FASTQ=0
-
-# ==============================================================================
-# FUNZIONI GENERALI
-# ==============================================================================
-
-log() {
-    printf '\n\033[1;34m[%s]\033[0m %s\n' "$(date '+%F %T')" "$*"
-}
-
-ok() {
-    printf '\033[1;32m✅ %s\033[0m\n' "$*"
-}
-
-warn() {
-    printf '\033[1;33m⚠️  %s\033[0m\n' "$*" >&2
-}
-
-die() {
-    printf '\033[1;31m❌ ERRORE: %s\033[0m\n' "$*" >&2
-    exit 1
-}
-
-on_error() {
-    local status=$?
-    local line="${1:-?}"
-
-    printf '\n\033[1;31m❌ Pipeline interrotta alla riga %s, codice %s.\033[0m\n' \
-        "${line}" "${status}" >&2
-
-    exit "${status}"
-}
-
-trap 'on_error "${LINENO}"' ERR
-
-require_file() {
-    local path="$1"
-    local description="$2"
-
-    [[ -f "${path}" ]] \
-        || die "${description} non trovato: ${path}"
-
-    [[ -r "${path}" ]] \
-        || die "${description} non leggibile: ${path}"
-}
-
-require_dir() {
-    local path="$1"
-    local description="$2"
-
-    [[ -d "${path}" ]] \
-        || die "${description} non trovata: ${path}"
-
-    [[ -r "${path}" && -x "${path}" ]] \
-        || die "${description} non leggibile/attraversabile: ${path}"
-}
-
-activate_environment() {
-    local env_path="$1"
-    local env_label="$2"
-
-    # Inizializza esplicitamente il Conda appena installato, anche quando il
-    # terminale di partenza mostra un altro ambiente "(base)".
-    # shellcheck source=/dev/null
-    source "${CONDA_BASE}/etc/profile.d/conda.sh"
-
-    conda activate "${env_path}"
-
-    [[ "${CONDA_PREFIX:-}" == "${env_path}" ]] \
-        || die "Impossibile attivare ${env_label}: ${env_path}"
-
-    log "Ambiente attivo: ${env_label}"
-    log "CONDA_PREFIX: ${CONDA_PREFIX}"
-}
-
-deactivate_environment() {
-    local env_label="$1"
-
-    conda deactivate
-    log "Ambiente disattivato: ${env_label}"
-}
-
-sample_name() {
-    local barcode="$1"
-    local label="$2"
-
-    printf '%s_barcode_%s_%s' \
-        "${BATCH_NAME}" \
-        "${barcode}" \
-        "${label}"
-}
-
-# Trova ricorsivamente FASTQ compressi o non compressi.
-collect_fastq_files() {
-    local barcode_dir="$1"
-    local -n destination_array="$2"
-
-    mapfile -d '' destination_array < <(
-        find "${barcode_dir}" \
-            -type f \
-            \( \
-                -iname '*.fastq.gz' -o \
-                -iname '*.fq.gz'    -o \
-                -iname '*.fastq'    -o \
-                -iname '*.fq' \
-            \) \
-            -readable \
-            -print0 \
-        | sort -z
-    )
-}
-
-combine_fastq_files() {
-    local barcode="$1"
-    local label="$2"
-    local output_fastq="$3"
-    local barcode_dir="${FASTQ_DIR}/barcode${barcode}"
-    local -a input_files=()
-
-    collect_fastq_files "${barcode_dir}" input_files
-
-    (( ${#input_files[@]} > 0 )) \
-        || die "Nessun FASTQ leggibile trovato in ${barcode_dir} o nelle sue sottocartelle."
-
-    : > "${output_fastq}"
-
-    local input_file
-    local input_file_lower
-
-    for input_file in "${input_files[@]}"; do
-        input_file_lower="${input_file,,}"
-
-        case "${input_file_lower}" in
-            *.fastq.gz|*.fq.gz)
-                gzip -cd -- "${input_file}" >> "${output_fastq}"
-                ;;
-            *.fastq|*.fq)
-                cat -- "${input_file}" >> "${output_fastq}"
-                ;;
-            *)
-                die "Formato FASTQ non riconosciuto: ${input_file}"
-                ;;
-        esac
-    done
-
-    [[ -s "${output_fastq}" ]] \
-        || die "Il FASTQ combinato è vuoto: ${output_fastq}"
-
-    log "FASTQ combinato: $(sample_name "${barcode}" "${label}")"
-    log "File sorgente: ${#input_files[@]}"
-}
-
-# ==============================================================================
-# CONTROLLI PRELIMINARI
-# ==============================================================================
-
-if [[ "${EUID}" -eq 0 ]]; then
-    die "Non eseguire la pipeline con sudo. Usa: ./pipeline_bulk_da_vs_sano.sh"
-fi
-
-umask 002
-
-[[ -d "${FASTQ_DIR}" ]] \
-    || die "Cartella FASTQ non trovata: ${FASTQ_DIR}"
-
-require_file "${REF}" "Genoma di riferimento"
-require_file "${GTF}" "Annotazione GTF"
-require_file "${R_SCRIPT}" "Script R per DESeq2"
-
-[[ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]] \
-    || die "Inizializzazione Conda non trovata in ${CONDA_BASE}."
-
+# --- Ambienti ed eseguibili ---------------------------------------------------
 MAIN_ENV="${CONDA_BASE}/envs/nanopore_bulk_stable"
+PYCHOPPER_ENV="${CONDA_BASE}/envs/nanopore_pychopper"
 FASTCAT_ENV="${CONDA_BASE}/envs/nanopore_fastcat"
 R_ENV="${CONDA_BASE}/envs/nanopore_deseq2"
 
-[[ -d "${MAIN_ENV}" ]] \
-    || die "Ambiente principale non trovato: ${MAIN_ENV}"
+FASTCAT="${FASTCAT_ENV}/bin/fastcat"
+PYCHOPPER="${PYCHOPPER_ENV}/bin/pychopper"
+NHMMSCAN="${PYCHOPPER_ENV}/bin/nhmmscan"
+MINIMAP2="${MAIN_ENV}/bin/minimap2"
+SAMTOOLS="${MAIN_ENV}/bin/samtools"
+FEATURECOUNTS="${MAIN_ENV}/bin/featureCounts"
+RSCRIPT="${R_ENV}/bin/Rscript"
 
-[[ -d "${FASTCAT_ENV}" ]] \
-    || die "Ambiente fastcat non trovato: ${FASTCAT_ENV}"
+CURRENT_SAMPLE="inizializzazione"
+CURRENT_STAGE="controlli iniziali"
+CURRENT_TMP_DIR=""
 
-[[ -d "${R_ENV}" ]] \
-    || die "Ambiente R/DESeq2 non trovato: ${R_ENV}"
+on_error() {
+    local status=$?
 
-case "${FEATURECOUNTS_STRAND}" in
-    0|1|2)
-        ;;
-    *)
-        die "FEATURECOUNTS_STRAND deve essere 0, 1 oppure 2."
-        ;;
-esac
-
-AVAILABLE_THREADS="$(nproc)"
-
-if (( THREADS > AVAILABLE_THREADS )); then
-    warn "THREADS=${THREADS}, ma il sistema espone ${AVAILABLE_THREADS} CPU."
-    warn "Uso THREADS=${AVAILABLE_THREADS}."
-    THREADS="${AVAILABLE_THREADS}"
-fi
-
-(( THREADS >= 1 )) \
-    || die "THREADS deve essere almeno 1."
-
-# ==============================================================================
-# ACCESSO RICORSIVO A CARTELLE E FILE FASTQ
-# ==============================================================================
-
-if (( AUTO_FIX_INPUT_PERMISSIONS == 1 )); then
-    log "Verifica/concessione dei permessi di sola lettura sugli input FASTQ..."
-
-    command -v sudo >/dev/null 2>&1 \
-        || die "sudo non disponibile: impossibile correggere i permessi degli input."
-
-    if command -v setfacl >/dev/null 2>&1; then
-        # ACL: concede l'accesso solo all'utente corrente.
-        sudo find "${FASTQ_DIR}" \
-            -type d \
-            -exec setfacl -m "u:${USER}:rx" {} +
-
-        sudo find "${FASTQ_DIR}" \
-            -type f \
-            \( \
-                -iname '*.fastq.gz' -o \
-                -iname '*.fq.gz'    -o \
-                -iname '*.fastq'    -o \
-                -iname '*.fq' \
-            \) \
-            -exec setfacl -m "u:${USER}:r" {} +
-    else
-        # Fallback portabile: sola lettura e attraversamento, mai scrittura.
-        warn "setfacl non disponibile: applico chmod a+rX soltanto a FASTQ_DIR."
-        sudo chmod -R a+rX "${FASTQ_DIR}"
+    if [[ -n "${CURRENT_TMP_DIR}" && -d "${CURRENT_TMP_DIR}" ]]; then
+        rm -rf "${CURRENT_TMP_DIR}" 2>/dev/null || true
     fi
 
-    ok "Permessi di lettura degli input verificati."
-fi
+    printf '\nERRORE: pipeline interrotta.\n' >&2
+    printf '  Campione: %s\n' "${CURRENT_SAMPLE}" >&2
+    printf '  Fase    : %s\n' "${CURRENT_STAGE}" >&2
+    printf '  Riga    : %s\n' "${BASH_LINENO[0]:-?}" >&2
+    printf '  Codice  : %s\n' "${status}" >&2
+    printf 'Puoi rilanciare la stessa cartella OUTPUT_ROOT: gli step completi saranno saltati.\n' >&2
+    exit "${status}"
+}
+trap on_error ERR
 
-# Il controllo completo viene eseguito dopo l'eventuale correzione dei permessi.
-require_dir "${FASTQ_DIR}" "Cartella FASTQ"
+die() {
+    printf 'ERRORE: %s\n' "$*" >&2
+    exit 1
+}
 
-# Costruisce l'elenco ordinato dei campioni.
-declare -a SAMPLE_BARCODES=()
-declare -a SAMPLE_LABELS=()
+warn() {
+    printf 'ATTENZIONE: %s\n' "$*" >&2
+}
 
-for barcode in "${CONTROL_BARCODES[@]}"; do
-    SAMPLE_BARCODES+=("${barcode}")
-    SAMPLE_LABELS+=("${CONTROL_LABEL}")
-done
+require_executable() {
+    [[ -x "$1" ]] || die "Eseguibile non trovato: $1"
+}
 
-for barcode in "${TREATMENT_BARCODES[@]}"; do
-    SAMPLE_BARCODES+=("${barcode}")
-    SAMPLE_LABELS+=("${TREATMENT_LABEL}")
-done
+require_readable_file() {
+    [[ -f "$1" && -r "$1" ]] || die "File non trovato o non leggibile: $1"
+}
 
-# Verifica tutte le directory barcode e la presenza di almeno un FASTQ leggibile.
-for index in "${!SAMPLE_BARCODES[@]}"; do
-    barcode="${SAMPLE_BARCODES[$index]}"
-    label="${SAMPLE_LABELS[$index]}"
-    barcode_dir="${FASTQ_DIR}/barcode${barcode}"
+require_nonempty_file() {
+    [[ -s "$1" ]] || die "Output assente o vuoto: $1"
+}
 
-    require_dir "${barcode_dir}" "Cartella barcode${barcode}"
+sample_name() {
+    printf '%s_barcode_%s_%s' "${BATCH_NAME}" "$1" "$2"
+}
+
+check_readable_fastq() {
+    local barcode_dir="$1"
+    local first_fastq
+
+    [[ -d "${barcode_dir}" && -r "${barcode_dir}" && -x "${barcode_dir}" ]] \
+        || die "Cartella non leggibile: ${barcode_dir}"
 
     first_fastq="$(
         find "${barcode_dir}" \
@@ -332,472 +125,341 @@ for index in "${!SAMPLE_BARCODES[@]}"; do
             \) \
             -readable \
             -print \
-            -quit
+            -quit 2>/dev/null || true
     )"
 
     [[ -n "${first_fastq}" ]] \
-        || die "Nessun FASTQ leggibile per barcode${barcode} (${label})."
-done
+        || die "Nessun FASTQ leggibile trovato in ${barcode_dir}"
+}
 
-# ==============================================================================
-# CARTELLA OUTPUT, ESTERNA ALLA CARTELLA FASTQ DI INPUT
-# ==============================================================================
+run_fastcat() {
+    env PATH="${FASTCAT_ENV}/bin:${PATH}" "${FASTCAT}" "$@"
+}
 
-FASTQ_DIR="$(realpath -e "${FASTQ_DIR}")"
-OUTPUT_PARENT="$(dirname "${FASTQ_DIR}")"
-RUN_ID="$(date '+%Y%m%d_%H%M%S')"
+run_pychopper() {
+    # Pychopper richiama nhmmscan come processo esterno.
+    env PATH="${PYCHOPPER_ENV}/bin:${PATH}" "${PYCHOPPER}" "$@"
+}
 
-OUTPUT_ROOT="${OUTPUT_PARENT}/${BATCH_NAME}_bulk_output_${RUN_ID}"
+process_sample() {
+    local barcode="$1"
+    local label="$2"
+    local sample barcode_dir
+    local filtered_fastq full_length_fastq sorted_bam counts_file
+    local filtered_tmp full_length_tmp bam_tmp counts_tmp
+    local sample_tmp
+    local -a pychopper_args
 
-case "${OUTPUT_ROOT}/" in
-    "${FASTQ_DIR}/"*)
-        die "La cartella output non può essere interna a FASTQ_DIR."
-        ;;
-esac
+    sample="$(sample_name "${barcode}" "${label}")"
+    barcode_dir="${FASTQ_DIR}/barcode${barcode}"
 
-LOG_DIR="${OUTPUT_ROOT}/00_logs"
-WORK_DIR="${OUTPUT_ROOT}/00_work_temporaneo"
-NANOPLOT_DIR="${OUTPUT_ROOT}/01_nanoplot"
-FASTCAT_DIR="${OUTPUT_ROOT}/02_fastcat"
-PYCHOPPER_DIR="${OUTPUT_ROOT}/03_pychopper"
-MINIMAP2_DIR="${OUTPUT_ROOT}/04_minimap2"
-SAMTOOLS_DIR="${OUTPUT_ROOT}/05_samtools"
-FEATURECOUNTS_DIR="${OUTPUT_ROOT}/06_featurecounts"
-DESEQ2_DIR="${OUTPUT_ROOT}/07_deseq2"
+    filtered_fastq="${FASTCAT_DIR}/${sample}_filtered.fastq"
+    full_length_fastq="${PYCHOPPER_DIR}/${sample}_full_length.fastq"
+    sorted_bam="${BAM_DIR}/${sample}_sorted.bam"
+    counts_file="${COUNTS_DIR}/${sample}_counts.txt"
 
-mkdir -p \
-    "${LOG_DIR}" \
-    "${WORK_DIR}" \
-    "${NANOPLOT_DIR}" \
-    "${FASTCAT_DIR}" \
-    "${PYCHOPPER_DIR}" \
-    "${MINIMAP2_DIR}" \
-    "${SAMTOOLS_DIR}" \
-    "${FEATURECOUNTS_DIR}" \
-    "${DESEQ2_DIR}"
+    filtered_tmp="${filtered_fastq}.partial"
+    full_length_tmp="${full_length_fastq}.partial"
+    bam_tmp="${sorted_bam}.partial"
+    counts_tmp="${counts_file}.partial"
 
-LOG_FILE="${LOG_DIR}/pipeline_${RUN_ID}.log"
+    sample_tmp="${TMP_DIR}/${sample}"
+    CURRENT_SAMPLE="${sample}"
+    CURRENT_TMP_DIR="${sample_tmp}"
 
-exec > >(tee -a "${LOG_FILE}") 2>&1
+    # Pulisce soltanto residui incompleti del campione corrente.
+    rm -rf "${sample_tmp}"
+    mkdir -p "${sample_tmp}"
+    rm -f \
+        "${filtered_tmp}" \
+        "${full_length_tmp}" \
+        "${bam_tmp}" \
+        "${bam_tmp}.bai" \
+        "${counts_tmp}" \
+        "${counts_tmp}.summary"
 
-log "Cartella input : ${FASTQ_DIR}"
-log "Cartella output: ${OUTPUT_ROOT}"
-log "Thread usati   : ${THREADS}"
+    CURRENT_STAGE="verifica FASTQ"
+    check_readable_fastq "${barcode_dir}"
 
-# ==============================================================================
-# COMPATIBILITÀ FRA FASTA E GTF
-# ==============================================================================
+    # Un file di conteggio completo significa che il campione è terminato.
+    if [[ -s "${counts_file}" ]]; then
+        ln -sfn "${counts_file}" "${DESEQ2_DIR}/$(basename "${counts_file}")"
+        printf '\n[%s] già completato: salto il campione\n' "${sample}"
+        rm -rf "${sample_tmp}"
+        CURRENT_TMP_DIR=""
+        return 0
+    fi
 
-log "Controllo compatibilità dei nomi di sequenza fra FASTA e GTF..."
+    # --------------------------------------------------------------------------
+    # FASTCAT
+    # Ogni campione usa una directory di lavoro diversa. In questo modo le
+    # cartelle automatiche fastcat-qc/fastcat-histograms non possono collidere.
+    # --------------------------------------------------------------------------
+    if [[ -s "${filtered_fastq}" ]]; then
+        printf '\n[%s] fastcat già completato: riuso output\n' "${sample}"
+    else
+        CURRENT_STAGE="fastcat"
+        printf '\n[%s] fastcat\n' "${sample}"
 
-REF_CONTIGS="${LOG_DIR}/reference_contigs.txt"
-GTF_CONTIGS="${LOG_DIR}/gtf_contigs.txt"
-COMMON_CONTIGS="${LOG_DIR}/common_contigs.txt"
+        mkdir -p "${sample_tmp}/fastcat"
+        (
+            cd "${sample_tmp}/fastcat"
+            run_fastcat fastq \
+                -x \
+                --min-length "${MIN_LENGTH}" \
+                --min-qscore "${MIN_QSCORE}" \
+                "${barcode_dir}"
+        ) > "${filtered_tmp}"
 
-grep '^>' "${REF}" \
-    | sed 's/^>//; s/[[:space:]].*$//' \
-    | sort -u \
-    > "${REF_CONTIGS}"
+        require_nonempty_file "${filtered_tmp}"
+        mv -f "${filtered_tmp}" "${filtered_fastq}"
+        rm -rf "${sample_tmp}/fastcat"
+    fi
 
-grep -v '^#' "${GTF}" \
-    | cut -f1 \
-    | sed '/^[[:space:]]*$/d' \
-    | sort -u \
-    > "${GTF_CONTIGS}"
+    # --------------------------------------------------------------------------
+    # PYCHOPPER
+    # --------------------------------------------------------------------------
+    if [[ -s "${full_length_fastq}" ]]; then
+        printf '[%s] Pychopper già completato: riuso output\n' "${sample}"
+    else
+        CURRENT_STAGE="Pychopper"
+        printf '[%s] Pychopper\n' "${sample}"
 
-[[ -s "${REF_CONTIGS}" ]] \
-    || die "Non riesco a leggere le intestazioni dal FASTA: ${REF}"
-
-[[ -s "${GTF_CONTIGS}" ]] \
-    || die "Non riesco a leggere i contig dal GTF: ${GTF}"
-
-grep -Fxf "${REF_CONTIGS}" "${GTF_CONTIGS}" \
-    > "${COMMON_CONTIGS}" || true
-
-[[ -s "${COMMON_CONTIGS}" ]] \
-    || die "FASTA e GTF non condividono alcun nome di cromosoma/contig."
-
-ok "FASTA e GTF condividono nomi di sequenza compatibili."
-
-# ==============================================================================
-# 1. COMBINAZIONE FASTQ E NANOPLOT
-# Ambiente: nanopore_bulk_stable
-# ==============================================================================
-
-stage_nanoplot() (
-    set -Eeuo pipefail
-
-    activate_environment "${MAIN_ENV}" "nanopore_bulk_stable"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
-
-    export MPLBACKEND="Agg"
-
-    command -v NanoPlot >/dev/null 2>&1 \
-        || die "NanoPlot non disponibile nell'ambiente principale."
-
-    log "Avvio combinazione FASTQ e NanoPlot..."
-
-    local_index=0
-    for local_index in "${!SAMPLE_BARCODES[@]}"; do
-        barcode="${SAMPLE_BARCODES[$local_index]}"
-        label="${SAMPLE_LABELS[$local_index]}"
-        sample="$(sample_name "${barcode}" "${label}")"
-
-        combined_fastq="${WORK_DIR}/${sample}_combined.fastq"
-        nanoplot_output="${NANOPLOT_DIR}/${sample}"
-
-        combine_fastq_files \
-            "${barcode}" \
-            "${label}" \
-            "${combined_fastq}"
-
-        mkdir -p "${nanoplot_output}"
-
-        NanoPlot \
-            -t "${THREADS}" \
-            --fastq "${combined_fastq}" \
-            --outdir "${nanoplot_output}" \
-            --plots hex
-
-        ok "NanoPlot completato: ${sample}"
-    done
-
-    deactivate_environment "nanopore_bulk_stable"
-    trap - EXIT
-)
-
-stage_nanoplot
-
-# ==============================================================================
-# 2. FILTRAGGIO FASTCAT
-# Ambiente: nanopore_fastcat
-# ==============================================================================
-
-stage_fastcat() (
-    set -Eeuo pipefail
-
-    activate_environment "${FASTCAT_ENV}" "nanopore_fastcat"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
-
-    command -v fastcat >/dev/null 2>&1 \
-        || die "fastcat non disponibile nell'ambiente nanopore_fastcat."
-
-    log "Avvio filtraggio fastcat..."
-
-    local_index=0
-    for local_index in "${!SAMPLE_BARCODES[@]}"; do
-        barcode="${SAMPLE_BARCODES[$local_index]}"
-        label="${SAMPLE_LABELS[$local_index]}"
-        sample="$(sample_name "${barcode}" "${label}")"
-
-        combined_fastq="${WORK_DIR}/${sample}_combined.fastq"
-        filtered_fastq="${FASTCAT_DIR}/${sample}_filtered.fastq"
-        fastcat_log="${FASTCAT_DIR}/${sample}_fastcat.log"
-
-        [[ -s "${combined_fastq}" ]] \
-            || die "FASTQ combinato mancante o vuoto: ${combined_fastq}"
-
-        fastcat fastq \
-            --min-length "${MIN_LENGTH}" \
-            --min-qscore "${MIN_QSCORE}" \
-            "${combined_fastq}" \
-            > "${filtered_fastq}" \
-            2> "${fastcat_log}"
-
-        [[ -s "${filtered_fastq}" ]] \
-            || die "fastcat non ha prodotto read per ${sample}. Controlla ${fastcat_log}"
-
-        if (( KEEP_COMBINED_FASTQ == 0 )); then
-            rm -f -- "${combined_fastq}"
-        fi
-
-        ok "fastcat completato: ${sample}"
-    done
-
-    deactivate_environment "nanopore_fastcat"
-    trap - EXIT
-)
-
-stage_fastcat
-
-# ==============================================================================
-# 3. PYCHOPPER
-# Ambiente: nanopore_bulk_stable
-# ==============================================================================
-
-stage_pychopper() (
-    set -Eeuo pipefail
-
-    activate_environment "${MAIN_ENV}" "nanopore_bulk_stable"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
-
-    command -v pychopper >/dev/null 2>&1 \
-        || die "Pychopper non disponibile nell'ambiente principale."
-
-    log "Avvio Pychopper..."
-
-    local_index=0
-    for local_index in "${!SAMPLE_BARCODES[@]}"; do
-        barcode="${SAMPLE_BARCODES[$local_index]}"
-        label="${SAMPLE_LABELS[$local_index]}"
-        sample="$(sample_name "${barcode}" "${label}")"
-
-        filtered_fastq="${FASTCAT_DIR}/${sample}_filtered.fastq"
-        full_length_fastq="${PYCHOPPER_DIR}/${sample}_full_length.fastq"
-        unclassified_fastq="${PYCHOPPER_DIR}/${sample}_unclassified.fastq"
-        pychopper_report="${PYCHOPPER_DIR}/${sample}_pychopper_report.pdf"
-        pychopper_log="${PYCHOPPER_DIR}/${sample}_pychopper.log"
-
-        [[ -s "${filtered_fastq}" ]] \
-            || die "FASTQ filtrato mancante o vuoto: ${filtered_fastq}"
-
-        pychopper_args=(
-            -t "${THREADS}"
-            -r "${pychopper_report}"
-            -u "${unclassified_fastq}"
-        )
-
+        pychopper_args=(-t "${THREADS}")
         if [[ -n "${PYCHOPPER_KIT}" ]]; then
             pychopper_args+=(-k "${PYCHOPPER_KIT}")
         fi
 
-        pychopper \
-            "${pychopper_args[@]}" \
-            "${filtered_fastq}" \
-            "${full_length_fastq}" \
-            > "${pychopper_log}" \
-            2>&1
+        mkdir -p "${sample_tmp}/pychopper"
+        (
+            cd "${sample_tmp}/pychopper"
+            run_pychopper \
+                "${pychopper_args[@]}" \
+                "${filtered_fastq}" \
+                "${full_length_tmp}"
+        )
 
-        [[ -s "${full_length_fastq}" ]] \
-            || die "Pychopper non ha prodotto read full-length per ${sample}. Controlla ${pychopper_log}"
+        require_nonempty_file "${full_length_tmp}"
+        mv -f "${full_length_tmp}" "${full_length_fastq}"
+        rm -rf "${sample_tmp}/pychopper"
+    fi
 
-        ok "Pychopper completato: ${sample}"
-    done
+    # --------------------------------------------------------------------------
+    # MINIMAP2 + SAMTOOLS SORT
+    # --------------------------------------------------------------------------
+    if [[ -s "${sorted_bam}" ]] && "${SAMTOOLS}" quickcheck "${sorted_bam}"; then
+        printf '[%s] BAM già completato: riuso output\n' "${sample}"
+    else
+        rm -f "${sorted_bam}" "${sorted_bam}.bai"
+        CURRENT_STAGE="minimap2 e samtools sort"
+        printf '[%s] minimap2 + samtools sort\n' "${sample}"
 
-    deactivate_environment "nanopore_bulk_stable"
-    trap - EXIT
-)
-
-stage_pychopper
-
-# ==============================================================================
-# 4. MINIMAP2 + SAMTOOLS SORT/INDEX
-# Ambiente: nanopore_bulk_stable
-#
-# L'output SAM non viene scritto su disco:
-# minimap2 invia direttamente lo stream a samtools sort.
-# ==============================================================================
-
-stage_alignment() (
-    set -Eeuo pipefail
-
-    activate_environment "${MAIN_ENV}" "nanopore_bulk_stable"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
-
-    command -v minimap2 >/dev/null 2>&1 \
-        || die "minimap2 non disponibile nell'ambiente principale."
-
-    command -v samtools >/dev/null 2>&1 \
-        || die "samtools non disponibile nell'ambiente principale."
-
-    log "Avvio allineamento minimap2 e ordinamento samtools..."
-
-    local_index=0
-    for local_index in "${!SAMPLE_BARCODES[@]}"; do
-        barcode="${SAMPLE_BARCODES[$local_index]}"
-        label="${SAMPLE_LABELS[$local_index]}"
-        sample="$(sample_name "${barcode}" "${label}")"
-
-        full_length_fastq="${PYCHOPPER_DIR}/${sample}_full_length.fastq"
-        sorted_bam="${SAMTOOLS_DIR}/${sample}_sorted.bam"
-        minimap2_log="${MINIMAP2_DIR}/${sample}_minimap2.log"
-        flagstat_file="${SAMTOOLS_DIR}/${sample}_flagstat.txt"
-
-        [[ -s "${full_length_fastq}" ]] \
-            || die "FASTQ full-length mancante o vuoto: ${full_length_fastq}"
-
-        minimap2 \
+        mkdir -p "${sample_tmp}/samtools"
+        "${MINIMAP2}" \
             -t "${THREADS}" \
             -ax splice \
             -uf \
             --secondary=no \
             "${REF}" \
             "${full_length_fastq}" \
-            2> "${minimap2_log}" \
-        | samtools sort \
+        | "${SAMTOOLS}" sort \
             -@ "${THREADS}" \
-            -o "${sorted_bam}" \
+            -T "${sample_tmp}/samtools/sort" \
+            -o "${bam_tmp}" \
             -
 
-        samtools quickcheck -v "${sorted_bam}"
+        require_nonempty_file "${bam_tmp}"
+        "${SAMTOOLS}" quickcheck "${bam_tmp}"
+        mv -f "${bam_tmp}" "${sorted_bam}"
+        rm -rf "${sample_tmp}/samtools"
+    fi
 
-        samtools index \
-            -@ "${THREADS}" \
-            "${sorted_bam}"
+    # --------------------------------------------------------------------------
+    # FEATURECOUNTS
+    # --------------------------------------------------------------------------
+    CURRENT_STAGE="featureCounts"
+    printf '[%s] featureCounts\n' "${sample}"
 
-        samtools flagstat \
-            -@ "${THREADS}" \
-            "${sorted_bam}" \
-            > "${flagstat_file}"
-
-        [[ -s "${sorted_bam}" ]] \
-            || die "BAM ordinato mancante o vuoto: ${sorted_bam}"
-
-        [[ -s "${sorted_bam}.bai" ]] \
-            || die "Indice BAM mancante: ${sorted_bam}.bai"
-
-        ok "Allineamento e BAM completati: ${sample}"
-    done
-
-    deactivate_environment "nanopore_bulk_stable"
-    trap - EXIT
-)
-
-stage_alignment
-
-# ==============================================================================
-# 5. FEATURECOUNTS
-# Ambiente: nanopore_bulk_stable
-# ==============================================================================
-
-stage_featurecounts() (
-    set -Eeuo pipefail
-
-    activate_environment "${MAIN_ENV}" "nanopore_bulk_stable"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
-
-    command -v featureCounts >/dev/null 2>&1 \
-        || die "featureCounts non disponibile nell'ambiente principale."
-
-    log "Avvio quantificazione featureCounts..."
-
-    local_index=0
-    for local_index in "${!SAMPLE_BARCODES[@]}"; do
-        barcode="${SAMPLE_BARCODES[$local_index]}"
-        label="${SAMPLE_LABELS[$local_index]}"
-        sample="$(sample_name "${barcode}" "${label}")"
-
-        sorted_bam="${SAMTOOLS_DIR}/${sample}_sorted.bam"
-        counts_file="${FEATURECOUNTS_DIR}/${sample}_counts.txt"
-        featurecounts_log="${FEATURECOUNTS_DIR}/${sample}_featureCounts.log"
-
-        [[ -s "${sorted_bam}" ]] \
-            || die "BAM ordinato mancante o vuoto: ${sorted_bam}"
-
-        featureCounts \
+    mkdir -p "${sample_tmp}/featurecounts"
+    (
+        cd "${sample_tmp}/featurecounts"
+        "${FEATURECOUNTS}" \
             -L \
-            -T "${THREADS}" \
             -s "${FEATURECOUNTS_STRAND}" \
             -a "${GTF}" \
-            -o "${counts_file}" \
+            -o "${counts_tmp}" \
             -t exon \
             -g gene_id \
-            "${sorted_bam}" \
-            > "${featurecounts_log}" \
-            2>&1
+            "${sorted_bam}"
+    )
 
-        [[ -s "${counts_file}" ]] \
-            || die "featureCounts non ha creato ${counts_file}. Controlla ${featurecounts_log}"
+    require_nonempty_file "${counts_tmp}"
+    mv -f "${counts_tmp}" "${counts_file}"
 
-        [[ -s "${counts_file}.summary" ]] \
-            || die "Summary featureCounts mancante: ${counts_file}.summary"
-
-        ok "featureCounts completato: ${sample}"
-    done
-
-    deactivate_environment "nanopore_bulk_stable"
-    trap - EXIT
-)
-
-stage_featurecounts
-
-# ==============================================================================
-# 6. DESEQ2
-# Ambiente: nanopore_deseq2
-#
-# I file counts vengono collegati nella cartella DESeq2, così lo script R riceve
-# una singola directory dedicata e tutti gli output restano separati.
-# ==============================================================================
-
-log "Preparazione della cartella DESeq2..."
-
-for counts_file in "${FEATURECOUNTS_DIR}"/*_counts.txt; do
-    ln -sfn \
-        "${counts_file}" \
-        "${DESEQ2_DIR}/$(basename "${counts_file}")"
-
-    if [[ -f "${counts_file}.summary" ]]; then
-        ln -sfn \
-            "${counts_file}.summary" \
-            "${DESEQ2_DIR}/$(basename "${counts_file}.summary")"
+    # Il report è utile ma non è necessario per DESeq2.
+    if [[ -f "${counts_tmp}.summary" ]]; then
+        mv -f "${counts_tmp}.summary" "${counts_file}.summary" 2>/dev/null \
+            || warn "Impossibile rinominare il report ${counts_tmp}.summary"
     fi
+
+    ln -sfn "${counts_file}" "${DESEQ2_DIR}/$(basename "${counts_file}")"
+
+    rm -rf "${sample_tmp}"
+    CURRENT_TMP_DIR=""
+    printf '[%s] completato\n' "${sample}"
+}
+
+# ==============================================================================
+# CONTROLLI INIZIALI ESSENZIALI
+# ==============================================================================
+
+[[ -d "${FASTQ_DIR}" && -r "${FASTQ_DIR}" && -x "${FASTQ_DIR}" ]] \
+    || die "Cartella FASTQ non leggibile: ${FASTQ_DIR}"
+
+require_readable_file "${REF}"
+require_readable_file "${GTF}"
+
+require_executable "${FASTCAT}"
+require_executable "${PYCHOPPER}"
+require_executable "${NHMMSCAN}"
+require_executable "${MINIMAP2}"
+require_executable "${SAMTOOLS}"
+require_executable "${FEATURECOUNTS}"
+
+[[ "${THREADS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "THREADS deve essere un intero maggiore di zero"
+
+[[ "${MIN_LENGTH}" =~ ^[0-9]+$ ]] \
+    || die "MIN_LENGTH deve essere un intero non negativo"
+
+[[ "${MIN_QSCORE}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+    || die "MIN_QSCORE deve essere un numero non negativo"
+
+case "${FEATURECOUNTS_STRAND}" in
+    0|1|2) ;;
+    *) die "FEATURECOUNTS_STRAND deve essere 0, 1 oppure 2" ;;
+esac
+
+case "${RUN_DESEQ2}" in
+    0|1) ;;
+    *) die "RUN_DESEQ2 deve essere 0 oppure 1" ;;
+esac
+
+if [[ "${RUN_DESEQ2}" == "1" ]]; then
+    require_readable_file "${R_SCRIPT}"
+    require_executable "${RSCRIPT}"
+
+    # Controllo rapido: evita di scoprire a fine pipeline uno script R non valido.
+    env \
+        PATH="${R_ENV}/bin:${PATH}" \
+        R_HOME="${R_ENV}/lib/R" \
+        "${RSCRIPT}" -e '
+            a <- commandArgs(trailingOnly = TRUE)
+            parse(file = a[1])
+            if (!requireNamespace("DESeq2", quietly = TRUE)) {
+                stop("Pacchetto R DESeq2 non disponibile")
+            }
+        ' "${R_SCRIPT}" >/dev/null
+fi
+
+# Verifica reale del comando esterno richiesto da Pychopper.
+env PATH="${PYCHOPPER_ENV}/bin:${PATH}" "${NHMMSCAN}" -h >/dev/null
+
+# Controlla tutti i barcode prima di iniziare una lavorazione lunga.
+for barcode in "${CONTROL_BARCODES[@]}"; do
+    check_readable_fastq "${FASTQ_DIR}/barcode${barcode}"
+done
+for barcode in "${TREATMENT_BARCODES[@]}"; do
+    check_readable_fastq "${FASTQ_DIR}/barcode${barcode}"
 done
 
-stage_deseq2() (
-    set -Eeuo pipefail
+# ==============================================================================
+# DIRECTORY DI OUTPUT
+# ==============================================================================
 
-    activate_environment "${R_ENV}" "nanopore_deseq2"
-    trap 'conda deactivate >/dev/null 2>&1 || true' EXIT
+FASTQ_DIR="$(realpath -e "${FASTQ_DIR}")"
+OUTPUT_PARENT="$(dirname "${FASTQ_DIR}")"
+RUN_ID="$(date '+%Y%m%d_%H%M%S')"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${OUTPUT_PARENT}/${BATCH_NAME}_bulk_output_${RUN_ID}}"
 
-    command -v Rscript >/dev/null 2>&1 \
-        || die "Rscript non disponibile nell'ambiente nanopore_deseq2."
+mkdir -p "${OUTPUT_ROOT}"
+OUTPUT_ROOT="$(realpath -e "${OUTPUT_ROOT}")"
 
-    Rscript -e 'stopifnot(requireNamespace("DESeq2", quietly = TRUE))'
+FASTCAT_DIR="${OUTPUT_ROOT}/01_fastcat"
+PYCHOPPER_DIR="${OUTPUT_ROOT}/02_pychopper"
+BAM_DIR="${OUTPUT_ROOT}/03_bam"
+COUNTS_DIR="${OUTPUT_ROOT}/04_featurecounts"
+DESEQ2_DIR="${OUTPUT_ROOT}/05_deseq2"
+TMP_DIR="${OUTPUT_ROOT}/.tmp"
 
-    log "Avvio DESeq2..."
+mkdir -p \
+    "${FASTCAT_DIR}" \
+    "${PYCHOPPER_DIR}" \
+    "${BAM_DIR}" \
+    "${COUNTS_DIR}" \
+    "${DESEQ2_DIR}" \
+    "${TMP_DIR}"
+
+# Residui dei tentativi precedenti di fastcat non vengono mai riutilizzati.
+rm -rf \
+    "${FASTCAT_DIR}/fastcat-qc" \
+    "${FASTCAT_DIR}/fastcat-histograms" 2>/dev/null || true
+
+printf 'Input : %s\n' "${FASTQ_DIR}"
+printf 'Output: %s\n' "${OUTPUT_ROOT}"
+
+# ==============================================================================
+# ELABORAZIONE DEI CAMPIONI
+# ==============================================================================
+
+for barcode in "${CONTROL_BARCODES[@]}"; do
+    process_sample "${barcode}" "${CONTROL_LABEL}"
+done
+
+for barcode in "${TREATMENT_BARCODES[@]}"; do
+    process_sample "${barcode}" "${TREATMENT_LABEL}"
+done
+
+# Tutti i conteggi devono essere presenti prima di DESeq2.
+CURRENT_SAMPLE="tutti i campioni"
+CURRENT_STAGE="verifica conteggi"
+
+EXPECTED_SAMPLES=$(( ${#CONTROL_BARCODES[@]} + ${#TREATMENT_BARCODES[@]} ))
+COUNT_FILES=("${DESEQ2_DIR}"/*_counts.txt)
+
+if (( ${#COUNT_FILES[@]} != EXPECTED_SAMPLES )); then
+    die "Attesi ${EXPECTED_SAMPLES} file di conteggio, trovati ${#COUNT_FILES[@]} in ${DESEQ2_DIR}"
+fi
+
+for count_file in "${COUNT_FILES[@]}"; do
+    require_nonempty_file "${count_file}"
+done
+
+# ==============================================================================
+# DESEQ2
+# ==============================================================================
+
+if [[ "${RUN_DESEQ2}" == "1" ]]; then
+    CURRENT_STAGE="DESeq2"
+    printf '\n[DESeq2] analisi differenziale\n'
 
     (
         cd "${DESEQ2_DIR}"
-
-        Rscript \
+        env \
+            PATH="${R_ENV}/bin:${PATH}" \
+            R_HOME="${R_ENV}/lib/R" \
+            "${RSCRIPT}" \
             "${R_SCRIPT}" \
             "${DESEQ2_DIR}" \
             "${TREATMENT_LABEL}" \
             "${CONTROL_LABEL}"
     )
-
-    ok "DESeq2 completato."
-
-    deactivate_environment "nanopore_deseq2"
-    trap - EXIT
-)
-
-stage_deseq2
-
-# ==============================================================================
-# COMPLETAMENTO
-# ==============================================================================
-
-if (( KEEP_COMBINED_FASTQ == 0 )); then
-    rmdir "${WORK_DIR}" 2>/dev/null || true
+else
+    printf '\nDESeq2 non eseguito perché RUN_DESEQ2=0.\n'
 fi
 
-cat <<EOF
+CURRENT_STAGE="pulizia finale"
+rm -rf "${TMP_DIR}" 2>/dev/null || true
 
-==============================================================================
-✅ ANALISI COMPLETATA CON SUCCESSO
-==============================================================================
-
-Input FASTQ:
-    ${FASTQ_DIR}
-
-Output:
-    ${OUTPUT_ROOT}
-
-Sottocartelle:
-    00_logs
-    01_nanoplot
-    02_fastcat
-    03_pychopper
-    04_minimap2
-    05_samtools
-    06_featurecounts
-    07_deseq2
-
-Log principale:
-    ${LOG_FILE}
-
-Gli input FASTQ non sono stati modificati o eliminati.
-Non sono stati applicati permessi 777.
-==============================================================================
-EOF
+CURRENT_STAGE="completata"
+printf '\nANALISI COMPLETATA\nOutput: %s\n' "${OUTPUT_ROOT}"
