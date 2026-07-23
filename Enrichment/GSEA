@@ -1,0 +1,116 @@
+# load data
+library(fgsea)
+library(ggplot2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(biomaRt)
+library(dplyr)
+library(clusterProfiler)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+
+results = read.delim("enterovirus_all_genes.csv",sep=",",header=TRUE)
+gmt_file = "c2.cp.kegg_medicus.v2025.1.Hs.symbols.gmt"
+
+num.cols <- c("baseMean","log2FoldChange","lfcSE","stat","pvalue","padj")
+ # Converti formato europeo → standard
+results[num.cols] <- lapply(results[num.cols], function(x) {
+   as.numeric(gsub(",", ".", x))
+ })
+results_with_symbol <- results[!is.na(results$hgnc_symbol) & results$hgnc_symbol != "", ]
+ensembl_ids <- results$Ensembl_ID
+ensembl_ids <- sub("\\..*", "", ensembl_ids)
+mapping <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = ensembl_ids,
+    keytype = "ENSEMBL",
+    columns = c("ENSEMBL","ENTREZID","SYMBOL")
+)
+results$Ensembl_ID_clean <- ensembl_ids
+results <- merge(results, mapping,
+                 by.x = "Ensembl_ID_clean",
+                 by.y = "ENSEMBL",
+                 all.x = TRUE)
+
+my_genes = results$hgnc_symbol
+genes_in_data = results$hgnc_symbol
+
+
+
+### Function to convert gmt to list
+matrix_to_list <- function(pws){
+  pws.l <- list()
+  for (pw in colnames(pws)) {
+    pws.l[[pw]] <- rownames(pws)[as.logical(pws[, pw])]
+  }
+  return(pws.l)
+}
+
+prepare_gmt <- function(gmt_file, genes_in_data, savefile = FALSE){
+  gmt <- gmtPathways(gmt_file)
+  hidden <- unique(unlist(gmt))
+  mat <- matrix(NA, dimnames = list(hidden, names(gmt)),
+                nrow = length(hidden), ncol = length(gmt))
+  for (i in 1:dim(mat)[2]){
+    mat[,i] <- as.numeric(hidden %in% gmt[[i]])
+  }
+  hidden1 <- intersect(genes_in_data, hidden)
+  mat <- mat[hidden1, colnames(mat)[which(colSums(mat[hidden1,])>5)]] 
+  final_list <- matrix_to_list(mat) 
+  if(savefile){
+    saveRDS(final_list, file = paste0(gsub('.gmt', '', gmt_file), '_subset_', format(Sys.time(), '%d%m'), '.RData'))
+  }
+  print('Wohoo! .gmt conversion successfull!:)')
+  return(final_list)
+}
+
+bg_genes = prepare_gmt(gmt_file, genes_in_data, savefile=FALSE)
+rankings <- sign(results$log2FoldChange)*(-log10(results$pvalue))
+names(rankings) <- my_genes
+rankings <- sort(rankings, decreasing = TRUE)
+
+#plot
+#png("ranking_pain_fgsea.png",width=720,height=720)
+#plot(rankings) 
+#dev.off()
+
+max_ranking <- max(rankings[is.finite(rankings)])
+min_ranking <- min(rankings[is.finite(rankings)])
+rankings <- replace(rankings, rankings > max_ranking, max_ranking * 10) 
+rankings <- replace(rankings, rankings < min_ranking, min_ranking * 10) 
+rankings <- sort(rankings, decreasing = TRUE) 
+#top 50 ranked genes plot
+#png("top50_genes_pain.png",width=720,height=720)
+#ggplot(data.frame(gene_symbol = names(rankings)[1:20], ranks = rankings[1:20]), aes(gene_symbol, ranks)) + 
+# geom_point() +
+# theme_classic() + 
+# theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#dev.off()
+rankings <- rankings[!(names(rankings) == "" | is.na(names(rankings)))]
+rankings <- rankings[!duplicated(names(rankings))]
+any(names(rankings) == "")
+any(is.na(names(rankings)))
+any(duplicated(names(rankings)))
+
+
+GSEAres <- fgsea(pathways = bg_genes, 
+                 stats = rankings,
+                 scoreType = 'std',
+                 minSize = 10,
+                 maxSize = 500,
+                 nproc = 1)
+         
+collapsedPathways <- collapsePathways(GSEAres[order(pval)][pval < 0.05], bg_genes, rankings)
+mainPathways <- GSEAres[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway] ###NES normalized enrichnent score
+#pdf(file = "main_paths_fgsea_pain_2024_10_25.pdf", width = 20, height = 15)
+#plotGseaTable(bg_genes[mainPathways], rankings, GSEAres, gseaParam = 0.5)
+#dev.off()
+
+gsea = as.data.frame(GSEAres)
+list_columns <- sapply(gsea, is.list)
+gsea[list_columns] <- lapply(gsea[list_columns], function(x) sapply(x, toString))
+write.table(gsea, file = "fgsea_pain_2024_10_25.csv", col.names = NA, sep = ",")
+gsea[list_columns] <- lapply(gsea[list_columns], function(x) sapply(x, paste, collapse = ", "))
+write.table(gsea, file = "gsea_pain_2024_10_25.csv", col.names = NA, sep = ",")
